@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "minAppVersion": "1.0.0",
   "description": "Publish selected Obsidian notes to Confluence Server/Data Center with images and wikilink preservation",
-  "author": "y-tsubouchi",
+  "author": "yuuk1",
   "isDesktopOnly": true
 }
