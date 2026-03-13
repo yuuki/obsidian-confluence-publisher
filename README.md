@@ -20,6 +20,19 @@ Publish Obsidian notes to **Confluence Server / Data Center** with full support 
 
 ## Installation
 
+### Using BRAT (recommended for beta users)
+
+[BRAT](https://tfthacker.com/BRAT) (Beta Reviewers Auto-update Tester) lets you install plugins directly from GitHub without manual file copying.
+
+1. Install and enable the **BRAT** plugin from Obsidian's Community plugins
+2. Open BRAT settings and click **Add Beta plugin**
+3. Enter the repository URL: `https://github.com/yuuki/obsidian-confluence-publisher`
+4. Click **Add Plugin** — BRAT will download and install it automatically
+5. Enable **Confluence Publisher** in Obsidian → Settings → Community plugins
+6. Configure your Confluence URL, credentials, and at least one destination
+
+### Manual installation
+
 1. Copy the plugin folder into your vault's `.obsidian/plugins/confluence-publisher/` directory
 2. Enable **Confluence Publisher** in Obsidian → Settings → Community plugins
 3. Configure your Confluence URL, credentials, and at least one destination
