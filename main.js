@@ -90,7 +90,7 @@ function migrateSettings(data, createId) {
   }
   const destinations = rawDestinations.map((value) => {
     const destination = isRecord2(value) ? value : {};
-    const id = typeof destination.id === "string" && destination.id.length > 0 ? destination.id : createId();
+    const id = typeof destination.id === "string" && destination.id.trim().length > 0 ? destination.id : createId();
     const label = typeof destination.label === "string" ? destination.label : "";
     const spaceKey = typeof destination.spaceKey === "string" ? destination.spaceKey : "";
     const parentPageId = typeof destination.parentPageId === "string" ? destination.parentPageId : "";

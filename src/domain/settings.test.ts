@@ -132,6 +132,33 @@ describe('migrateSettings', () => {
 		});
 	});
 
+	it('replaces a whitespace-only destination ID once and preserves the generated ID', () => {
+		let createIdCalls = 0;
+		const first = migrateSettings({
+			...DEFAULT_SETTINGS,
+			destinations: [{
+				id: '   ',
+				label: 'Docs',
+				spaceKey: 'DOC',
+				parentPageId: '42',
+			}],
+		}, () => {
+			createIdCalls += 1;
+			return 'dest-generated';
+		});
+
+		expect(first.changed).toBe(true);
+		expect(first.settings.destinations[0].id).toBe('dest-generated');
+		expect(createIdCalls).toBe(1);
+
+		const reloaded = migrateSettings(first.settings, () => {
+			throw new Error('must preserve the generated destination id');
+		});
+		expect(reloaded.changed).toBe(false);
+		expect(reloaded.settings.destinations[0].id).toBe('dest-generated');
+		expect(createIdCalls).toBe(1);
+	});
+
 	it('normalizes invalid known top-level fields and preserves unknown fields', () => {
 		const result = migrateSettings({
 			confluenceUrl: 42,

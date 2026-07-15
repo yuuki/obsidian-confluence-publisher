@@ -54,7 +54,7 @@ export function migrateSettings(
 	}
 	const destinations = rawDestinations.map((value): Destination => {
 		const destination = isRecord(value) ? value : {};
-		const id = typeof destination.id === 'string' && destination.id.length > 0
+		const id = typeof destination.id === 'string' && destination.id.trim().length > 0
 			? destination.id
 			: createId();
 		const label = typeof destination.label === 'string' ? destination.label : '';
