@@ -1,9 +1,13 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { verifyVersions } from './verify-version.mjs';
 
 const scriptPath = fileURLToPath(new URL('./verify-version.mjs', import.meta.url));
+const currentVersion = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version as string;
 
 describe('verifyVersions', () => {
   it('accepts matching package, manifest, and v-prefixed tag versions', () => {
@@ -40,10 +44,10 @@ describe('verifyVersions', () => {
   it('reads repository versions and the release tag when run directly', () => {
     const output = execFileSync(process.execPath, [scriptPath], {
       encoding: 'utf8',
-      env: { ...process.env, RELEASE_TAG: 'v0.1.0' },
+      env: { ...process.env, RELEASE_TAG: `v${currentVersion}` },
     });
 
-    expect(output).toBe('Version 0.1.0 is consistent.\n');
+    expect(output).toBe(`Version ${currentVersion} is consistent.\n`);
   });
 
   it('ignores the pull request merge ref when run directly', () => {
@@ -55,7 +59,7 @@ describe('verifyVersions', () => {
       env,
     });
 
-    expect(output).toBe('Version 0.1.0 is consistent.\n');
+    expect(output).toBe(`Version ${currentVersion} is consistent.\n`);
   });
 
   it('fails direct execution when the release tag is inconsistent', () => {
