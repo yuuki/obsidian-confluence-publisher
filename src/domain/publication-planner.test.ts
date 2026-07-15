@@ -423,6 +423,35 @@ describe('buildPublicationPlan remote resolution', () => {
 		expect(findPagesByTitle).toHaveBeenCalledWith('DOC', 'Note', signal);
 	});
 
+	it('stops after a saved-page lookup aborts before resolving', async () => {
+		const controller = new AbortController();
+		const { repository, findPagesByTitle } = lookup({
+			getPage: async (_pageId, signal) => {
+				expect(signal).toBe(controller.signal);
+				controller.abort();
+				return page({ id: '100' });
+			},
+		});
+
+		await expect(build([note({ publication: publication('100') })], repository, controller.signal))
+			.rejects.toMatchObject({ name: 'AbortError' });
+		expect(findPagesByTitle).not.toHaveBeenCalled();
+	});
+
+	it('stops after a title lookup aborts before resolving', async () => {
+		const controller = new AbortController();
+		const { repository } = lookup({
+			findPagesByTitle: async (_spaceKey, _title, signal) => {
+				expect(signal).toBe(controller.signal);
+				controller.abort();
+				return [];
+			},
+		});
+
+		await expect(build([note()], repository, controller.signal))
+			.rejects.toMatchObject({ name: 'AbortError' });
+	});
+
 	it('throws AbortError before lookup when the signal is already aborted', async () => {
 		const controller = new AbortController();
 		controller.abort();

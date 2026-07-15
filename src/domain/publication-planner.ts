@@ -143,11 +143,13 @@ async function resolveNote(
 	const savedPageId = note.publication?.pageId ?? note.legacyPublication?.pageId ?? null;
 	if (savedPageId !== null) {
 		const savedPage = await repository.getPage(savedPageId, signal);
+		signal.throwIfAborted();
 		if (savedPage !== null) return resolveSavedPage(snapshot, note, savedPage, isLegacy);
 	}
 
 	signal.throwIfAborted();
 	const candidates = await repository.findPagesByTitle(snapshot.spaceKey, note.title, signal);
+	signal.throwIfAborted();
 	if (candidates.length === 0) {
 		return {
 			page: {
