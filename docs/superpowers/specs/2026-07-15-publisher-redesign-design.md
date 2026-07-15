@@ -109,23 +109,39 @@ confluence-publications:
 
 ページIDが存在する場合、repositoryはページを取得してspaceと直接のparentを検証する。
 
+ページにはcontent property `obsidian-confluence-publisher`を保存し、valueにschema version、destination ID、vault内source pathを持たせる。
+
+新形式のpublication recordを持つページは、content propertyのdestination IDとsource pathも一致する場合だけ更新する。
+
+旧frontmatterの明示的なページIDは、spaceと直接のparentを検証できた場合だけ既存ページへcontent propertyを付与して移行する。
+
+旧frontmatterのままでも、明示的なページID、space、直接のparent、既に付与済みのdestination IDとsource pathがすべて一致する場合は、所有権付与済みの移行途中状態として再利用する。
+
 ページIDが404の場合だけ、選択space、parent、titleで再探索する。
 
-候補が一件なら再関連付けし、候補がなければ新規作成を計画する。
+検索結果が一件だけで、そのspace、直接のparent、content propertyのdestination IDとsource pathが一致する場合だけ再関連付けする。検索結果が0件なら新規作成を計画する。
 
-同名ページが別parentにある場合や候補を一件に決められない場合は、自動更新せずエラーにする。
+一致候補と不一致候補が混在する場合を含め、同名ページにcontent propertyがない場合、別source pathのpropertyがある場合、別parentにある場合、検索結果が複数の場合は、自動更新せずエラーにする。
 
-ページIDがない場合も同じspace、parent、titleで検索し、一件なら関連付け、なければ新規作成を計画する。
+ページIDがない場合も同じspace、parent、titleで検索し、所有権が一致する一件なら関連付け、候補自体がなければ新規作成を計画する。
+
+人手で作られた同名ページは所有権propertyを持たないため、プラグインが自動で引き取らない。
 
 ## 二段階の適用
 
 全面再設計後も、相互リンクを成立させるために適用処理は二段階とする。
 
-第一段階は、必要なページをplaceholder本文で作成し、全ノートのfile path、title、page ID対応表を確定する。
+第一段階は、必要なページをplaceholder本文で作成し、所有権content propertyを付与してから、全ノートのfile path、title、page ID対応表を確定する。
+
+新規ページへのcontent property保存が失敗した場合、その実行で直前に作成したplaceholderページだけをDELETEしてrollbackする。
+
+rollbackも失敗した場合はpage IDとURLをエラーへ含め、利用者が孤立placeholderを特定できるようにする。
+
+Confluence responseに安全なweb UI URLがない場合は、設定base URLとpage IDから`pages/viewpage.action?pageId=...`を生成して報告する。
 
 第一段階で一件でも失敗した場合、リンク不整合を避けるため第二段階へ進まない。
 
-第一段階で作成済みのplaceholderページは、再実行時にspace、parent、titleから回収する。
+第一段階で作成済みのplaceholderページは、再実行時にspace、parent、title、所有権propertyから回収する。
 
 第二段階は、本文変換、添付反映、現在version取得、ページ更新、frontmatter書き戻しをページ単位で行う。
 
@@ -223,6 +239,8 @@ JSON APIはHTTP status、content type、parse errorを検査する。
 
 repositoryはtransportへ依存し、テストではfake transportへ差し替えられるようにする。
 
+repositoryはcontent propertyの取得、作成と、新規placeholderのrollbackに限ったページ削除を提供する。
+
 ## UIとキャンセル
 
 コマンドはactive fileがMarkdownの場合だけ実行可能にする。
@@ -238,6 +256,8 @@ ProgressModalは実行中にCloseではなくCancelを表示する。
 Cancelとmodal closeは同じ`AbortController`を中止する。
 
 中止後は新規ネットワーク操作を開始せず、実行中requestの終了を待って`cancelled`を表示する。
+
+ただし、今回作成したpageの所有権propertyが確定する前に中止された場合、そのpageのrollback DELETEだけは例外的なcleanupとして開始する。利用者の中止済みsignalを再利用せず、5秒timeoutの独立signalを使い、一度だけ試行する。第二段階や次pageの通信は開始しない。
 
 進捗イベントは`planned`、`page-created`、`attachment-created`、`attachment-updated`、`page-updated`、`failed`、`cancelled`、`complete`とする。
 
@@ -263,11 +283,15 @@ fixtureにはコード内wikilink、callout内Markdown、隣接callout、EOF cal
 
 publication plannerはdestination不一致、重複title、重複page ID、stale ID、別parentの同名ページ、未解決画像、部分更新リンク表を検証する。
 
+publication plannerは、所有権propertyなしの同名ページ、別source pathが所有する同名ページ、legacy IDへのproperty付与も検証する。
+
 publisherはfake repositoryとfake vaultを使い、第一段階失敗時の停止、第二段階のページ別継続、frontmatter書き戻し順序、strip frontmatter、cancelを検証する。
 
 transportはローカルHTTP serverを使い、protocol制約、timeout、abort、response中断、redirect、JSON error、multipartを検証する。
 
 repositoryはfake transportを使い、添付ページング、新規添付、既存添付更新を検証する。
+
+repositoryはfake transportを使い、content property取得、付与、競合時の上書き拒否、新規placeholderのrollbackも検証する。
 
 設定とUIから分離したvalidationとprogress reducerはunit testで検証する。
 
@@ -320,6 +344,11 @@ Release公開後にassetsを取得できることを確認する。
 ## 受け入れ条件
 
 - 選択destination以外のページを更新しない。
+- 所有権propertyが一致しない同名ページを更新しない。
+- 新規pageは本文処理前に所有権propertyを保存する。
+- 新規pageへの所有権保存失敗時は、直前に作成したpageだけをDELETEする。
+- rollback DELETEも失敗した場合は、孤立pageのIDとURLを報告する。
+- Cancel後は、最大一回かつ5秒上限のrollback DELETE以外の新規通信を開始しない。
 - 重複titleまたは重複page IDを外部変更前に拒否する。
 - 部分更新で公開済みノートへのwikilinkを維持する。
 - コード内のObsidian構文を変換しない。
