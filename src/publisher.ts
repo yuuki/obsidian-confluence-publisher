@@ -1,9 +1,9 @@
 import { App, TFile, parseYaml, stringifyYaml } from 'obsidian';
 import { ConfluenceClient } from './confluence/client';
-import { ImageRef, ProgressEvent } from './confluence/types';
+import { ProgressEvent } from './confluence/types';
 import { ConfluencePublisherSettings } from './settings';
-import { preprocessObsidianSyntax } from './converter/obsidian-syntax';
-import { markdownToStorageFormat } from './converter/markdown-to-storage';
+import { convertMarkdown } from './converter/storage-renderer';
+import type { EmbeddedImage } from './domain/publication';
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
@@ -118,21 +118,25 @@ export class Publisher {
 			}
 
 			try {
-				// Preprocess Obsidian syntax
-				const { content: preprocessed, images } =
-					await preprocessObsidianSyntax(
-						entry.body,
-						entry.file,
-						this.app,
-						publishedFiles,
-						spaceKey,
-					);
-
-				// Convert to Confluence storage format
-				const storageBody = markdownToStorageFormat(preprocessed);
+				const conversion = convertMarkdown(entry.body, {
+					sourcePath: entry.file.path,
+					spaceKey,
+					pageTitles: publishedFiles,
+					resolveLink: (target, sourcePath) =>
+						this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path
+						?? null,
+				});
+				if (conversion.issues.length > 0) {
+					const targets = conversion.issues.map((issue) => issue.target).join(', ');
+					throw new Error(`Unresolved image attachments: ${targets}`);
+				}
+				const storageBody = conversion.storage;
 
 				// Upload images (skip already-uploaded ones)
-				const { uploaded } = await this.uploadImages(entry.confluenceId, images);
+				const { uploaded } = await this.uploadImages(
+					entry.confluenceId,
+					conversion.images,
+				);
 				for (const filename of uploaded) {
 					yield { type: 'image_uploaded', filename };
 				}
@@ -203,7 +207,7 @@ export class Publisher {
 
 	private async uploadImages(
 		pageId: string,
-		images: ImageRef[],
+		images: EmbeddedImage[],
 	): Promise<{ uploaded: string[]; skipped: string[] }> {
 		const uploaded: string[] = [];
 		const skipped: string[] = [];
@@ -217,13 +221,14 @@ export class Publisher {
 		}
 
 		for (const img of images) {
-			if (!img.resolvedPath) continue;
 			const file = this.app.vault.getAbstractFileByPath(img.resolvedPath);
-			if (!file || !(file instanceof TFile)) continue;
+			if (!file || !(file instanceof TFile)) {
+				throw new Error(`Resolved attachment is not a file: ${img.resolvedPath}`);
+			}
 
-			if (existing.has(img.filename)) {
-				console.log(`[confluence-publisher] Skipping already uploaded: ${img.filename}`);
-				skipped.push(img.filename);
+			if (existing.has(img.attachmentName)) {
+				console.log(`[confluence-publisher] Skipping already uploaded: ${img.attachmentName}`);
+				skipped.push(img.attachmentName);
 				continue;
 			}
 
@@ -232,15 +237,15 @@ export class Publisher {
 				const mimeType = getMimeType(file.extension);
 				await this.client.uploadAttachment(
 					pageId,
-					img.filename,
+					img.attachmentName,
 					data,
 					mimeType,
 				);
-				uploaded.push(img.filename);
+				uploaded.push(img.attachmentName);
 			} catch (e) {
-				console.warn(
-					`Failed to upload attachment ${img.filename}:`,
-					e,
+				const message = e instanceof Error ? e.message : String(e);
+				throw new Error(
+					`Failed to upload attachment ${img.attachmentName}: ${message}`,
 				);
 			}
 		}

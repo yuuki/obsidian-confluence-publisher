@@ -24,10 +24,14 @@ __export(main_exports, {
   default: () => ConfluencePublisherPlugin
 });
 module.exports = __toCommonJS(main_exports);
+var import_crypto3 = require("crypto");
 var import_obsidian6 = require("obsidian");
 
 // src/settings.ts
+var import_crypto = require("crypto");
 var import_obsidian = require("obsidian");
+
+// src/domain/settings.ts
 var DEFAULT_SETTINGS = {
   confluenceUrl: "",
   destinations: [],
@@ -38,22 +42,46 @@ var DEFAULT_SETTINGS = {
   stripFrontmatter: true,
   titleSource: "frontmatter"
 };
-function migrateSettings(data) {
-  const settings = Object.assign({}, DEFAULT_SETTINGS, data);
-  if (!settings.destinations) {
-    settings.destinations = [];
+function migrateSettings(data, createId) {
+  const validSource = typeof data === "object" && data !== null && !Array.isArray(data);
+  const source = validSource ? data : {};
+  let changed = !validSource;
+  let destinations = Array.isArray(source.destinations) ? source.destinations.map((destination) => ({ ...destination })) : [];
+  if (!Array.isArray(source.destinations)) changed = true;
+  const hasValidatedLegacyPair = typeof source.spaceKey === "string" && typeof source.parentPageId === "string";
+  if (destinations.length === 0 && hasValidatedLegacyPair) {
+    destinations = [{
+      id: createId(),
+      label: source.spaceKey,
+      spaceKey: source.spaceKey,
+      parentPageId: source.parentPageId
+    }];
+    changed = true;
   }
-  if (settings.spaceKey && settings.parentPageId && settings.destinations.length === 0) {
-    settings.destinations.push({
-      label: settings.spaceKey,
-      spaceKey: settings.spaceKey,
-      parentPageId: settings.parentPageId
-    });
+  destinations = destinations.map((destination) => {
+    if (typeof destination.id === "string" && destination.id.length > 0) return destination;
+    changed = true;
+    return { ...destination, id: createId() };
+  });
+  if (hasValidatedLegacyPair) changed = true;
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    ...source,
+    destinations
+  };
+  if (hasValidatedLegacyPair) {
+    delete settings.spaceKey;
+    delete settings.parentPageId;
   }
-  delete settings.spaceKey;
-  delete settings.parentPageId;
-  return settings;
+  return { settings, changed };
 }
+async function loadMigratedSettings(data, createId, save) {
+  const migration = migrateSettings(data, createId);
+  if (migration.changed) await save(migration.settings);
+  return migration.settings;
+}
+
+// src/settings.ts
 var ConfluenceSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -95,6 +123,7 @@ var ConfluenceSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).addButton(
       (btn) => btn.setButtonText("Add destination").setCta().onClick(async () => {
         this.plugin.settings.destinations.push({
+          id: (0, import_crypto.randomUUID)(),
           label: "",
           spaceKey: "",
           parentPageId: ""
@@ -973,96 +1002,6 @@ Content-Type: ${mimeType}\r
     });
   }
 };
-
-// src/converter/obsidian-syntax.ts
-var IMAGE_EXT_PATTERN = /\.(png|jpe?g|gif|svg|webp)$/i;
-async function preprocessObsidianSyntax(content, file, app, publishedFiles, spaceKey) {
-  const images = [];
-  const imageEmbedRe = /!\[\[([^\]|]+?\.(png|jpe?g|gif|svg|webp))(?:\|([^\]]*))?\]\]/gi;
-  content = content.replace(
-    imageEmbedRe,
-    (match, filename, _ext, sizeOrAlt) => {
-      const parsed = sizeOrAlt ? parseInt(sizeOrAlt, 10) : NaN;
-      const width = !isNaN(parsed) ? parsed : null;
-      const resolved = app.metadataCache.getFirstLinkpathDest(filename, file.path);
-      const resolvedPath = resolved ? resolved.path : null;
-      const safeFilename = filenameOnly(filename);
-      images.push({
-        originalSyntax: match,
-        filename: safeFilename,
-        resolvedPath,
-        width
-      });
-      const widthAttr = width !== null ? ` ac:width="${width}"` : "";
-      return `<ac:image${widthAttr}><ri:attachment ri:filename="${escapeXml(safeFilename)}"/></ac:image>`;
-    }
-  );
-  const noteEmbedRe = /!\[\[([^\]]+?)\]\]/g;
-  content = content.replace(noteEmbedRe, (_match, linkPath) => {
-    if (IMAGE_EXT_PATTERN.test(linkPath)) {
-      return _match;
-    }
-    const resolved = app.metadataCache.getFirstLinkpathDest(linkPath, file.path);
-    if (resolved && publishedFiles.has(resolved.path)) {
-      const title = publishedFiles.get(resolved.path);
-      return `<ac:link><ri:page ri:content-title="${escapeXml(title)}" ri:space-key="${escapeXml(spaceKey)}"/></ac:link>`;
-    }
-    return `<em>(see: ${escapeXml(linkPath)})</em>`;
-  });
-  const wikilinkRe = /\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g;
-  content = content.replace(
-    wikilinkRe,
-    (_match, linkPath, alias) => {
-      const display = alias != null ? alias : linkPath;
-      const resolved = app.metadataCache.getFirstLinkpathDest(linkPath, file.path);
-      if (resolved && publishedFiles.has(resolved.path)) {
-        const title = publishedFiles.get(resolved.path);
-        return `<ac:link><ri:page ri:content-title="${escapeXml(title)}" ri:space-key="${escapeXml(spaceKey)}"/><ac:link-body>${escapeXml(display)}</ac:link-body></ac:link>`;
-      }
-      return escapeXml(display);
-    }
-  );
-  const calloutRe = /^> \[!(\w+)\]\s*(.*)?$(?:\r?\n)((?:^>.*$(?:\r?\n|$))*)/gm;
-  content = content.replace(
-    calloutRe,
-    (_match, type, titleLine, body) => {
-      const macroName = mapCalloutType(type);
-      const title = (titleLine != null ? titleLine : "").trim();
-      const bodyContent = stripCalloutPrefix(body);
-      const titleParam = title ? `<ac:parameter ac:name="title">${escapeXml(title)}</ac:parameter>` : "";
-      return `<ac:structured-macro ac:name="${macroName}">` + titleParam + `<ac:rich-text-body><p>${escapeXml(bodyContent)}</p></ac:rich-text-body></ac:structured-macro>
-`;
-    }
-  );
-  return { content, images };
-}
-function mapCalloutType(type) {
-  switch (type.toUpperCase()) {
-    case "NOTE":
-    case "INFO":
-      return "info";
-    case "WARNING":
-    case "CAUTION":
-      return "warning";
-    case "TIP":
-    case "HINT":
-      return "tip";
-    case "IMPORTANT":
-      return "note";
-    default:
-      return "info";
-  }
-}
-function stripCalloutPrefix(body) {
-  return body.split("\n").map((line) => line.replace(/^>\s?/, "")).filter((line) => line.length > 0).join(" ").trim();
-}
-function filenameOnly(linkPath) {
-  const parts = linkPath.split("/");
-  return parts[parts.length - 1];
-}
-function escapeXml(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-}
 
 // node_modules/marked/lib/marked.esm.js
 function _getDefaults() {
@@ -3137,146 +3076,499 @@ var parseInline = marked.parseInline;
 var parser = _Parser.parse;
 var lexer = _Lexer.lex;
 
-// src/converter/markdown-to-storage.ts
-function markdownToStorageFormat(markdown) {
-  const placeholders = /* @__PURE__ */ new Map();
-  let phId = 0;
-  const cfXmlRe = /<ac:(image|structured-macro|link)\b[\s\S]*?<\/ac:\1>/g;
-  const prepared = markdown.replace(cfXmlRe, (match) => {
-    const key = `CFXMLPH${phId++}ENDPH`;
-    placeholders.set(key, match);
-    return key;
+// src/converter/attachment-name.ts
+var import_crypto2 = require("crypto");
+function attachmentNameForPath(vaultPath) {
+  const normalizedPath = vaultPath.replace(/\\/g, "/");
+  const basename = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
+  const dot = basename.lastIndexOf(".");
+  const stem = dot > 0 ? basename.slice(0, dot) : basename;
+  const extension = dot > 0 ? basename.slice(dot).toLowerCase() : "";
+  const safeStem = stem.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "attachment";
+  const digest = (0, import_crypto2.createHash)("sha256").update(normalizedPath).digest("hex").slice(0, 12);
+  return `${safeStem}-${digest}${extension}`;
+}
+
+// src/converter/obsidian-marked-extension.ts
+var IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|svg|webp|bmp)$/i;
+var CALLOUT_START = /^>[ \t]?\[!(\w+)\]([+-])?[ \t]*(.*?)(\r?\n|$)/;
+var NEXT_CALLOUT = /^>[ \t]?\[!\w+\]/;
+function nullablePart(value) {
+  return value ? value : null;
+}
+function splitAlias(body) {
+  const separator = body.indexOf("|");
+  if (separator === -1) {
+    return { target: body, alias: null };
+  }
+  return {
+    target: body.slice(0, separator),
+    alias: nullablePart(body.slice(separator + 1))
+  };
+}
+function isImageTarget(target) {
+  return IMAGE_EXTENSION.test(target);
+}
+function openingFence(line) {
+  const match = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line);
+  if (!match || match[1][0] === "`" && match[2].includes("`")) {
+    return null;
+  }
+  return { delimiter: match[1] };
+}
+function closesFence(line, fence) {
+  const candidate = line.replace(/^ {0,3}/, "");
+  return candidate.startsWith(fence.delimiter) && /^[~`]* *$/.test(candidate.slice(fence.delimiter.length));
+}
+var calloutExtension = {
+  name: "obsidian-callout",
+  level: "block",
+  start(src) {
+    return src.search(/^>[ \t]?\[!\w+\]/m);
+  },
+  tokenizer(src) {
+    const header = CALLOUT_START.exec(src);
+    if (!header) {
+      return void 0;
+    }
+    let raw = header[0];
+    let body = "";
+    let offset = raw.length;
+    let fence = null;
+    while (offset < src.length) {
+      const remaining = src.slice(offset);
+      if (!remaining.startsWith(">")) {
+        break;
+      }
+      const newline2 = remaining.indexOf("\n");
+      const lineLength = newline2 === -1 ? remaining.length : newline2 + 1;
+      const line = remaining.slice(0, lineLength);
+      const bodyLine = line.replace(/^>[ \t]?/, "");
+      const bodyLineWithoutEnding = bodyLine.replace(/\r?\n$/, "");
+      if (fence === null && NEXT_CALLOUT.test(remaining)) {
+        break;
+      }
+      raw += line;
+      body += bodyLine;
+      offset += lineLength;
+      if (fence === null) {
+        fence = openingFence(bodyLineWithoutEnding);
+      } else if (closesFence(bodyLineWithoutEnding, fence)) {
+        fence = null;
+      }
+    }
+    const marker = header[2];
+    const token = {
+      type: "obsidian-callout",
+      raw,
+      calloutType: header[1],
+      title: nullablePart(header[3].trim()),
+      folded: marker === "-" ? true : marker === "+" ? false : null,
+      tokens: body ? this.lexer.blockTokens(body) : []
+    };
+    return token;
+  },
+  childTokens: ["tokens"]
+};
+var imageExtension = {
+  name: "obsidian-image",
+  level: "inline",
+  start(src) {
+    return src.indexOf("![[");
+  },
+  tokenizer(src) {
+    const match = /^!\[\[([^\]\r\n]*)\]\]/.exec(src);
+    if (!match) {
+      return void 0;
+    }
+    const body = match[1];
+    if (!body || body.includes("[[")) {
+      return void 0;
+    }
+    const { target, alias } = splitAlias(body);
+    if (!isImageTarget(target)) {
+      return void 0;
+    }
+    const numericWidth = alias !== null && /^\d+$/.test(alias) ? Number(alias) : null;
+    const hasWidth = numericWidth !== null && Number.isFinite(numericWidth);
+    const token = {
+      type: "obsidian-image",
+      raw: match[0],
+      target,
+      width: hasWidth ? numericWidth : null,
+      alt: hasWidth ? null : alias
+    };
+    return token;
+  }
+};
+var wikiLinkExtension = {
+  name: "obsidian-wikilink",
+  level: "inline",
+  start(src) {
+    return src.search(/!?\[\[/);
+  },
+  tokenizer(src) {
+    const match = /^(!?)\[\[([^\]\r\n]*)\]\]/.exec(src);
+    if (!match) {
+      return void 0;
+    }
+    const body = match[2];
+    if (!body || body.includes("[[")) {
+      return void 0;
+    }
+    const embed = match[1] === "!";
+    const { target: targetWithHeading, alias } = splitAlias(body);
+    if (embed && isImageTarget(targetWithHeading)) {
+      return void 0;
+    }
+    const headingSeparator = targetWithHeading.indexOf("#");
+    const target = headingSeparator === -1 ? targetWithHeading : targetWithHeading.slice(0, headingSeparator);
+    const heading2 = headingSeparator === -1 ? null : nullablePart(targetWithHeading.slice(headingSeparator + 1));
+    if (!target && !heading2) {
+      return void 0;
+    }
+    const token = {
+      type: "obsidian-wikilink",
+      raw: match[0],
+      target,
+      heading: heading2,
+      alias,
+      embed
+    };
+    return token;
+  }
+};
+function createMarked() {
+  return new Marked({
+    extensions: [calloutExtension, imageExtension, wikiLinkExtension]
   });
+}
+function walkObsidianTokens(tokens) {
+  const wikilinks = [];
+  const images = [];
+  const callouts = [];
+  createMarked().walkTokens(tokens, (token) => {
+    switch (token.type) {
+      case "obsidian-wikilink":
+        wikilinks.push(token);
+        break;
+      case "obsidian-image":
+        images.push(token);
+        break;
+      case "obsidian-callout":
+        callouts.push(token);
+        break;
+    }
+  });
+  return { wikilinks, images, callouts };
+}
+function parseObsidianMarkdown(markdown) {
+  const tokens = createMarked().lexer(markdown);
+  return {
+    tokens,
+    imageTokens: walkObsidianTokens(tokens).images
+  };
+}
+
+// src/converter/storage-renderer.ts
+function isXmlCharacter(codePoint) {
+  return codePoint === 9 || codePoint === 10 || codePoint === 13 || codePoint >= 32 && codePoint <= 55295 || codePoint >= 57344 && codePoint <= 65533 || codePoint >= 65536 && codePoint <= 1114111;
+}
+function xmlCharacters(value) {
+  return Array.from(
+    value,
+    (character) => {
+      var _a;
+      return isXmlCharacter((_a = character.codePointAt(0)) != null ? _a : 0) ? character : "\uFFFD";
+    }
+  ).join("");
+}
+function escapeXml(value) {
+  return xmlCharacters(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function markedText(value) {
+  return xmlCharacters(value).replace(/&#39;/g, "&apos;").replace(/&(?!(?:amp|lt|gt|quot|apos);)/g, "&amp;");
+}
+function hasOnlyXmlEntities(value) {
+  return xmlCharacters(value) === value && !/&(?!(?:amp|lt|gt|quot|apos);)/.test(value);
+}
+function hasSafeCharacterData(value) {
+  return !value.includes("]]>") && hasOnlyXmlEntities(value);
+}
+function hasSafeAttributes(value) {
+  let remaining = value;
+  const names = /* @__PURE__ */ new Set();
+  const attribute = /^\s+([A-Za-z_][\w.:-]*)\s*=\s*("[^"]*"|'[^']*')/;
+  while (remaining.trim()) {
+    const match = attribute.exec(remaining);
+    if (!match) return false;
+    const name = match[1];
+    const attributeValue = match[2].slice(1, -1);
+    if (name.includes(":") || names.has(name)) return false;
+    if (attributeValue.includes("<") || !hasOnlyXmlEntities(attributeValue)) {
+      return false;
+    }
+    names.add(name);
+    remaining = remaining.slice(match[0].length);
+  }
+  return true;
+}
+function scanXmlFragment(value, stack) {
+  var _a;
+  const markup = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<[^>]*>/g;
+  let offset = 0;
+  for (const match of value.matchAll(markup)) {
+    const text = value.slice(offset, match.index);
+    if (text.includes("<") || !hasSafeCharacterData(text)) return false;
+    const tag2 = match[0];
+    offset = ((_a = match.index) != null ? _a : 0) + tag2.length;
+    if (tag2.startsWith("<!--")) {
+      const comment = tag2.slice(4, -3);
+      if (comment.includes("--") || comment.endsWith("-") || xmlCharacters(comment) !== comment) return false;
+      continue;
+    }
+    if (tag2.startsWith("<![CDATA[")) {
+      const cdata = tag2.slice(9, -3);
+      if (xmlCharacters(cdata) !== cdata) return false;
+      continue;
+    }
+    const closing = /^<\/([A-Za-z_][\w.:-]*)\s*>$/.exec(tag2);
+    if (closing) {
+      if (stack.pop() !== closing[1]) return false;
+      continue;
+    }
+    const opening = /^<([A-Za-z_][\w.:-]*)([\s\S]*?)(\/?)>$/.exec(tag2);
+    if (!opening || opening[1].includes(":") || !hasSafeAttributes(opening[2])) {
+      return false;
+    }
+    if (!opening[3]) stack.push(opening[1]);
+  }
+  const tail = value.slice(offset);
+  return !tail.includes("<") && hasSafeCharacterData(tail);
+}
+function markSafeHtml(tokens, safeTokens) {
+  const inlineHtml = tokens.filter(
+    (token) => token.type === "html" && !token.block
+  );
+  if (inlineHtml.length > 0) {
+    const stack = [];
+    if (inlineHtml.every((token) => scanXmlFragment(token.text, stack)) && stack.length === 0) {
+      inlineHtml.forEach((token) => safeTokens.add(token));
+    }
+  }
+  for (const token of tokens) {
+    if (token.type === "html" && token.block) {
+      const stack = [];
+      if (scanXmlFragment(token.text, stack) && stack.length === 0) {
+        safeTokens.add(token);
+      }
+    }
+    if ("tokens" in token && Array.isArray(token.tokens)) {
+      markSafeHtml(token.tokens, safeTokens);
+    }
+    if (token.type === "list") {
+      for (const item of token.items) markSafeHtml(item.tokens, safeTokens);
+    }
+    if (token.type === "table") {
+      for (const cell of token.header) markSafeHtml(cell.tokens, safeTokens);
+      for (const row of token.rows) {
+        for (const cell of row) markSafeHtml(cell.tokens, safeTokens);
+      }
+    }
+  }
+}
+function displayText(token) {
+  var _a;
+  if (token.alias !== null) return token.alias;
+  if (!token.target) return (_a = token.heading) != null ? _a : "";
+  return token.heading === null ? token.target : `${token.target}#${token.heading}`;
+}
+function calloutMacroName(type) {
+  switch (type.toUpperCase()) {
+    case "WARNING":
+    case "CAUTION":
+      return "warning";
+    case "TIP":
+    case "HINT":
+      return "tip";
+    case "IMPORTANT":
+      return "note";
+    default:
+      return "info";
+  }
+}
+function parseItemBody(parser2, item) {
+  return parser2.parse(item.tokens, !!item.loose);
+}
+function convertMarkdown(markdown, context) {
+  const renderedImages = [];
+  const issues = [];
+  const safeHtmlTokens = /* @__PURE__ */ new WeakSet();
+  let taskId = 0;
   const renderer = new _Renderer();
-  renderer.heading = function({ tokens, depth }) {
-    const text = this.parser.parseInline(tokens);
-    return `<h${depth}>${text}</h${depth}>
+  renderer.heading = function(token) {
+    return `<h${token.depth}>${this.parser.parseInline(token.tokens)}</h${token.depth}>
 `;
   };
-  renderer.code = function(_token) {
-    const { text, lang } = _token;
-    const langParam = lang ? `<ac:parameter ac:name="language">${escapeXml2(lang)}</ac:parameter>` : "";
-    return `<ac:structured-macro ac:name="code">` + langParam + `<ac:plain-text-body><![CDATA[${text.replace(/]]>/g, "]]]]><![CDATA[>")}]]></ac:plain-text-body></ac:structured-macro>
+  renderer.code = function(token) {
+    const language = token.lang ? `<ac:parameter ac:name="language">${escapeXml(token.lang)}</ac:parameter>` : "";
+    const body = xmlCharacters(token.text).replace(/]]>/g, "]]]]><![CDATA[>");
+    return `<ac:structured-macro ac:name="code">${language}<ac:plain-text-body><![CDATA[${body}]]></ac:plain-text-body></ac:structured-macro>
 `;
   };
-  renderer.blockquote = function({ tokens }) {
-    const body = this.parser.parse(tokens);
-    return `<blockquote>${body}</blockquote>
+  renderer.blockquote = function(token) {
+    return `<blockquote>${this.parser.parse(token.tokens)}</blockquote>
 `;
   };
-  renderer.hr = function(_token) {
-    return `<hr/>
-`;
+  renderer.hr = function() {
+    return "<hr/>\n";
   };
   renderer.list = function(token) {
-    const tag2 = token.ordered ? "ol" : "ul";
-    let body = "";
-    for (const item of token.items) {
-      body += this.listitem(item);
-    }
-    return `<${tag2}>
-${body}</${tag2}>
+    const normalTag = token.ordered ? "ol" : "ul";
+    let output = "";
+    let index = 0;
+    while (index < token.items.length) {
+      const segmentIndex = index;
+      const taskSegment = token.items[index].task;
+      const segment = [];
+      while (index < token.items.length && token.items[index].task === taskSegment) {
+        segment.push(token.items[index]);
+        index++;
+      }
+      if (taskSegment) {
+        const tasks = segment.map((item) => {
+          const status = item.checked ? "complete" : "incomplete";
+          const id = ++taskId;
+          return `<ac:task><ac:task-id>${id}</ac:task-id><ac:task-status>${status}</ac:task-status><ac:task-body>${parseItemBody(this.parser, item)}</ac:task-body></ac:task>`;
+        }).join("\n");
+        output += `<ac:task-list>${tasks}</ac:task-list>
 `;
+      } else {
+        const start = token.ordered ? (token.start || 1) + segmentIndex : 1;
+        const startAttribute = token.ordered && start !== 1 ? ` start="${start}"` : "";
+        const items = segment.map((item) => `<li>${parseItemBody(this.parser, item)}</li>`).join("\n");
+        output += `<${normalTag}${startAttribute}>${items}</${normalTag}>
+`;
+      }
+    }
+    return output;
   };
   renderer.listitem = function(item) {
-    let itemBody = "";
-    if (item.task) {
-      const checkbox = item.checked ? "<ac:task-status>complete</ac:task-status>" : "<ac:task-status>incomplete</ac:task-status>";
-      const innerText = this.parser.parse(item.tokens);
-      itemBody = `<ac:task>${checkbox}<ac:task-body>${innerText}</ac:task-body></ac:task>`;
-    } else {
-      itemBody = this.parser.parse(item.tokens);
-    }
-    return `<li>${itemBody}</li>
+    return `<li>${this.parser.parse(item.tokens)}</li>
 `;
   };
-  renderer.paragraph = function({ tokens }) {
-    const text = this.parser.parseInline(tokens);
-    return `<p>${text}</p>
+  renderer.paragraph = function(token) {
+    return `<p>${this.parser.parseInline(token.tokens)}</p>
 `;
   };
   renderer.table = function(token) {
-    let headerRow = "<tr>\n";
-    for (const cell of token.header) {
-      const content = this.parser.parseInline(cell.tokens);
-      headerRow += `<th>${content}</th>
-`;
-    }
-    headerRow += "</tr>\n";
-    let bodyRows = "";
-    for (const row of token.rows) {
-      bodyRows += "<tr>\n";
-      for (const cell of row) {
-        const content = this.parser.parseInline(cell.tokens);
-        bodyRows += `<td>${content}</td>
-`;
-      }
-      bodyRows += "</tr>\n";
-    }
-    return `<table><tbody>
-${headerRow}${bodyRows}</tbody></table>
+    const header = token.header.map((cell) => `<th>${this.parser.parseInline(cell.tokens)}</th>`).join("\n");
+    const rows = token.rows.map((row) => {
+      const cells = row.map((cell) => `<td>${this.parser.parseInline(cell.tokens)}</td>`).join("\n");
+      return `<tr>${cells}</tr>`;
+    }).join("\n");
+    return `<table><tbody><tr>${header}</tr>${rows}</tbody></table>
 `;
   };
-  renderer.html = function({ text }) {
-    return text;
+  renderer.html = function(token) {
+    return safeHtmlTokens.has(token) ? token.text : escapeXml(token.text);
   };
-  renderer.strong = function({ tokens }) {
-    const text = this.parser.parseInline(tokens);
-    return `<strong>${text}</strong>`;
+  renderer.strong = function(token) {
+    return `<strong>${this.parser.parseInline(token.tokens)}</strong>`;
   };
-  renderer.em = function({ tokens }) {
-    const text = this.parser.parseInline(tokens);
-    return `<em>${text}</em>`;
+  renderer.em = function(token) {
+    return `<em>${this.parser.parseInline(token.tokens)}</em>`;
   };
-  renderer.codespan = function({ text }) {
-    return `<code>${text}</code>`;
+  renderer.codespan = function(token) {
+    return `<code>${markedText(token.text)}</code>`;
   };
-  renderer.br = function(_token) {
-    return `<br/>`;
+  renderer.br = function() {
+    return "<br/>";
   };
-  renderer.del = function({ tokens }) {
-    const text = this.parser.parseInline(tokens);
-    return `<del>${text}</del>`;
+  renderer.del = function(token) {
+    return `<del>${this.parser.parseInline(token.tokens)}</del>`;
   };
-  renderer.link = function({ href, title, tokens }) {
-    const text = this.parser.parseInline(tokens);
-    const titleAttr = title ? ` title="${escapeXml2(title)}"` : "";
-    return `<a href="${escapeXml2(href)}"${titleAttr}>${text}</a>`;
+  renderer.link = function(token) {
+    const title = token.title ? ` title="${markedText(token.title)}"` : "";
+    return `<a href="${escapeXml(token.href)}"${title}>${this.parser.parseInline(token.tokens)}</a>`;
   };
-  renderer.image = function({ href, title, text }) {
-    const altAttr = text || title ? ` ac:alt="${escapeXml2(text || title || "")}"` : "";
-    const xml = `<ac:image${altAttr}><ri:url ri:value="${escapeXml2(href)}"/></ac:image>`;
-    const key = `CFXMLPH${phId++}ENDPH`;
-    placeholders.set(key, xml);
-    return key;
+  renderer.image = function(token) {
+    const alt = markedText(token.text || token.title || "");
+    const altAttribute = alt ? ` ac:alt="${alt}"` : "";
+    return `<ac:image${altAttribute}><ri:url ri:value="${escapeXml(token.href)}"/></ac:image>`;
   };
   renderer.text = function(token) {
-    if ("tokens" in token && token.tokens && token.tokens.length > 0) {
+    var _a;
+    if ("tokens" in token && ((_a = token.tokens) == null ? void 0 : _a.length)) {
       return this.parser.parseInline(token.tokens);
     }
-    return token.text;
+    return markedText(token.text);
   };
-  renderer.space = function(_token) {
+  renderer.space = function() {
     return "";
   };
-  const marked2 = new Marked({ renderer });
-  let result = marked2.parse(prepared);
-  const blockTags = /* @__PURE__ */ new Set(["image", "structured-macro"]);
-  for (const [key, xml] of placeholders) {
-    const tagMatch = xml.match(/^<ac:(\w[\w-]*)/);
-    const isBlock = tagMatch ? blockTags.has(tagMatch[1]) : false;
-    if (isBlock) {
-      result = result.replace(
-        new RegExp(`<p>\\s*${key}\\s*</p>`),
-        xml + "\n"
-      );
+  const wikiLinkRenderer = {
+    name: "obsidian-wikilink",
+    renderer(genericToken) {
+      const token = genericToken;
+      const display = escapeXml(displayText(token));
+      const anchor = token.heading === null ? "" : ` ac:anchor="${escapeXml(token.heading)}"`;
+      if (!token.target && token.heading !== null) {
+        return `<ac:link${anchor}><ac:link-body>${display}</ac:link-body></ac:link>`;
+      }
+      const resolvedPath = context.resolveLink(token.target, context.sourcePath);
+      const title = resolvedPath === null ? void 0 : context.pageTitles.get(resolvedPath);
+      if (title !== void 0) {
+        return `<ac:link${anchor}><ri:page ri:content-title="${escapeXml(title)}" ri:space-key="${escapeXml(context.spaceKey)}"/><ac:link-body>${display}</ac:link-body></ac:link>`;
+      }
+      return token.embed ? `<em>(see: ${display})</em>` : display;
     }
-    result = result.replace(new RegExp(key, "g"), xml);
-  }
-  return result;
-}
-function escapeXml2(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  };
+  const imageRenderer = {
+    name: "obsidian-image",
+    renderer(genericToken) {
+      var _a;
+      const token = genericToken;
+      const resolvedPath = context.resolveLink(token.target, context.sourcePath);
+      if (resolvedPath === null) {
+        issues.push({ code: "unresolved-image", target: token.target });
+        return escapeXml((_a = token.alt) != null ? _a : token.target);
+      }
+      const attachmentName = attachmentNameForPath(resolvedPath);
+      renderedImages.push({
+        sourcePath: token.target,
+        resolvedPath,
+        attachmentName,
+        width: token.width
+      });
+      const width = token.width !== null && Number.isFinite(token.width) ? ` ac:width="${token.width}"` : "";
+      const alt = token.alt === null ? "" : ` ac:alt="${escapeXml(token.alt)}"`;
+      return `<ac:image${width}${alt}><ri:attachment ri:filename="${escapeXml(attachmentName)}"/></ac:image>`;
+    }
+  };
+  const calloutRenderer = {
+    name: "obsidian-callout",
+    renderer(genericToken) {
+      const token = genericToken;
+      const title = token.title === null ? "" : `<ac:parameter ac:name="title">${escapeXml(token.title)}</ac:parameter>`;
+      const body = this.parser.parse(token.tokens);
+      return `<ac:structured-macro ac:name="${calloutMacroName(token.calloutType)}">${title}<ac:rich-text-body>${body}</ac:rich-text-body></ac:structured-macro>
+`;
+    }
+  };
+  const marked2 = new Marked({
+    renderer,
+    extensions: [wikiLinkRenderer, imageRenderer, calloutRenderer]
+  });
+  const parsed = parseObsidianMarkdown(markdown);
+  markSafeHtml(parsed.tokens, safeHtmlTokens);
+  const storage = marked2.parser(parsed.tokens);
+  const images = renderedImages.filter(
+    (image, index, all) => all.findIndex(
+      (candidate) => candidate.resolvedPath === image.resolvedPath && candidate.attachmentName === image.attachmentName
+    ) === index
+  );
+  return { storage, images, issues };
 }
 
 // src/publisher.ts
@@ -3363,15 +3655,24 @@ var Publisher = class {
         continue;
       }
       try {
-        const { content: preprocessed, images } = await preprocessObsidianSyntax(
-          entry.body,
-          entry.file,
-          this.app,
-          publishedFiles,
-          spaceKey
+        const conversion = convertMarkdown(entry.body, {
+          sourcePath: entry.file.path,
+          spaceKey,
+          pageTitles: publishedFiles,
+          resolveLink: (target, sourcePath) => {
+            var _a2, _b2;
+            return (_b2 = (_a2 = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)) == null ? void 0 : _a2.path) != null ? _b2 : null;
+          }
+        });
+        if (conversion.issues.length > 0) {
+          const targets = conversion.issues.map((issue) => issue.target).join(", ");
+          throw new Error(`Unresolved image attachments: ${targets}`);
+        }
+        const storageBody = conversion.storage;
+        const { uploaded } = await this.uploadImages(
+          entry.confluenceId,
+          conversion.images
         );
-        const storageBody = markdownToStorageFormat(preprocessed);
-        const { uploaded } = await this.uploadImages(entry.confluenceId, images);
         for (const filename of uploaded) {
           yield { type: "image_uploaded", filename };
         }
@@ -3430,12 +3731,13 @@ var Publisher = class {
       existing = /* @__PURE__ */ new Set();
     }
     for (const img of images) {
-      if (!img.resolvedPath) continue;
       const file = this.app.vault.getAbstractFileByPath(img.resolvedPath);
-      if (!file || !(file instanceof import_obsidian5.TFile)) continue;
-      if (existing.has(img.filename)) {
-        console.log(`[confluence-publisher] Skipping already uploaded: ${img.filename}`);
-        skipped.push(img.filename);
+      if (!file || !(file instanceof import_obsidian5.TFile)) {
+        throw new Error(`Resolved attachment is not a file: ${img.resolvedPath}`);
+      }
+      if (existing.has(img.attachmentName)) {
+        console.log(`[confluence-publisher] Skipping already uploaded: ${img.attachmentName}`);
+        skipped.push(img.attachmentName);
         continue;
       }
       try {
@@ -3443,15 +3745,15 @@ var Publisher = class {
         const mimeType = getMimeType(file.extension);
         await this.client.uploadAttachment(
           pageId,
-          img.filename,
+          img.attachmentName,
           data,
           mimeType
         );
-        uploaded.push(img.filename);
+        uploaded.push(img.attachmentName);
       } catch (e) {
-        console.warn(
-          `Failed to upload attachment ${img.filename}:`,
-          e
+        const message = e instanceof Error ? e.message : String(e);
+        throw new Error(
+          `Failed to upload attachment ${img.attachmentName}: ${message}`
         );
       }
     }
@@ -3534,7 +3836,11 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
   }
   async loadSettings() {
     const data = await this.loadData();
-    this.settings = data ? migrateSettings(data) : { ...DEFAULT_SETTINGS };
+    this.settings = await loadMigratedSettings(
+      data,
+      import_crypto3.randomUUID,
+      (settings) => this.saveData(settings)
+    );
   }
   validateSettings() {
     const s = this.settings;
