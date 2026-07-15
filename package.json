@@ -1,6 +1,6 @@
 {
   "name": "obsidian-confluence-publisher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Publish Obsidian notes to Confluence Server/DC",
   "license": "MIT",
   "repository": {

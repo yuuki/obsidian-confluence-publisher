@@ -5,15 +5,6 @@ export interface ConfluencePageResponse {
   ancestors?: Array<{ id: string }>;
   version: { number: number };
   _links?: { webui?: string };
-  metadata?: {
-    properties?: {
-      'obsidian-confluence-publisher'?: {
-        id: string;
-        value: unknown;
-        version?: { number: number };
-      };
-    };
-  };
 }
 
 export interface ConfluenceAttachmentResponse {

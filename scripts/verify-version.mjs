@@ -3,13 +3,24 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /**
- * @param {{ packageVersion: string, manifestVersion: string, tag?: string }} versions
+ * @param {{ packageVersion: string, lockfileVersion: string, lockfileRootPackageVersion: string, manifestVersion: string, tag?: string }} versions
  */
-export function verifyVersions({ packageVersion, manifestVersion, tag }) {
+export function verifyVersions({
+  packageVersion,
+  lockfileVersion,
+  lockfileRootPackageVersion,
+  manifestVersion,
+  tag,
+}) {
   const normalizedTag = tag ? tag.replace(/^v/, '') : packageVersion;
-  if (packageVersion !== manifestVersion || packageVersion !== normalizedTag) {
+  if (
+    packageVersion !== lockfileVersion
+    || packageVersion !== lockfileRootPackageVersion
+    || packageVersion !== manifestVersion
+    || packageVersion !== normalizedTag
+  ) {
     throw new Error(
-      `Version mismatch: package=${packageVersion}, manifest=${manifestVersion}, tag=${normalizedTag}`,
+      `Version mismatch: package=${packageVersion}, lockfile=${lockfileVersion}, lockfileRootPackage=${lockfileRootPackageVersion}, manifest=${manifestVersion}, tag=${normalizedTag}`,
     );
   }
 }
@@ -20,9 +31,12 @@ function readJson(relativeUrl) {
 
 function main() {
   const packageJson = readJson('../package.json');
+  const packageLock = readJson('../package-lock.json');
   const manifest = readJson('../manifest.json');
   verifyVersions({
     packageVersion: packageJson.version,
+    lockfileVersion: packageLock.version,
+    lockfileRootPackageVersion: packageLock.packages?.['']?.version,
     manifestVersion: manifest.version,
     tag: process.env.RELEASE_TAG,
   });

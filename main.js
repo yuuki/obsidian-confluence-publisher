@@ -4442,7 +4442,7 @@ function escapeRegExp(value) {
 }
 
 // src/confluence/repository.ts
-var PAGE_EXPAND = "version,ancestors,space,metadata.properties.obsidian-confluence-publisher";
+var PAGE_EXPAND = "version,ancestors,space";
 var ATTACHMENT_LIMIT = 100;
 var ConfluenceRepository = class {
   constructor(transport) {
@@ -4451,17 +4451,34 @@ var ConfluenceRepository = class {
     this.uploadedAttachmentAliases = /* @__PURE__ */ new Map();
   }
   async getPage(pageId, signal) {
+    let response;
     try {
-      const page = await this.transport.requestJson({
+      response = await this.transport.requestJson({
         method: "GET",
         path: `/rest/api/content/${encodeURIComponent(pageId)}?expand=${encodeURIComponent(PAGE_EXPAND)}`,
         signal
       });
-      return resolvePage(page);
     } catch (error) {
       if (error instanceof TransportError && error.status === 404) return null;
       throw error;
     }
+    if (!isPageResponse(response)) throw new Error("Confluence returned an invalid page response.");
+    const ownership = await this.fetchOwnership(pageId, signal);
+    return resolvePage(response, ownership);
+  }
+  async fetchOwnership(pageId, signal) {
+    let response;
+    try {
+      response = await this.transport.requestJson({
+        method: "GET",
+        path: `/rest/api/content/${encodeURIComponent(pageId)}/property/${encodeURIComponent(PAGE_OWNERSHIP_PROPERTY)}`,
+        signal
+      });
+    } catch (error) {
+      if (error instanceof TransportError && error.status === 404) return null;
+      throw error;
+    }
+    return parseOwnershipProperty(pageId, response);
   }
   async findPagesByTitle(spaceKey, title, signal) {
     var _a;
@@ -4482,7 +4499,10 @@ var ConfluenceRepository = class {
         path,
         signal
       }), isPageResponse, "page");
-      pages.push(...collection.results.map((page) => resolvePage(page)));
+      for (const page of collection.results) {
+        const ownership = await this.fetchOwnership(page.id, signal);
+        pages.push(resolvePage(page, ownership));
+      }
       path = (_a = collection._links) == null ? void 0 : _a.next;
     }
     return pages;
@@ -4501,7 +4521,8 @@ var ConfluenceRepository = class {
       headers: { "Content-Type": "application/json" },
       signal
     });
-    return resolvePage(page, { spaceKey, parentPageId: parentId });
+    if (!isPageResponse(page)) throw new Error("Confluence returned an invalid page response.");
+    return resolvePage(page, null, { spaceKey, parentPageId: parentId });
   }
   async setPageOwnership(pageId, ownership, signal) {
     await this.transport.requestJson({
@@ -4587,10 +4608,8 @@ var ConfluenceRepository = class {
     return existing === void 0 ? "created" : "updated";
   }
 };
-function resolvePage(value, fallback) {
+function resolvePage(page, ownership, fallback) {
   var _a, _b, _c, _d, _e, _f, _g, _h, _i;
-  if (!isPageResponse(value)) throw new Error("Confluence returned an invalid page response.");
-  const page = value;
   const ancestors = (_a = page.ancestors) != null ? _a : [];
   return {
     id: page.id,
@@ -4599,27 +4618,13 @@ function resolvePage(value, fallback) {
     parentPageId: ancestors.length === 0 ? (_e = fallback == null ? void 0 : fallback.parentPageId) != null ? _e : null : (_g = (_f = ancestors[ancestors.length - 1]) == null ? void 0 : _f.id) != null ? _g : null,
     version: page.version.number,
     webui: (_i = (_h = page._links) == null ? void 0 : _h.webui) != null ? _i : null,
-    ownership: readOwnership(page)
+    ownership
   };
 }
-function readOwnership(page) {
-  const metadata = page.metadata;
-  if (metadata === void 0) return null;
-  if (!isRecord4(metadata) || Array.isArray(metadata)) {
-    throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
-  }
-  const properties = metadata.properties;
-  if (properties === void 0) return null;
-  if (!isRecord4(properties) || Array.isArray(properties)) {
-    throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
-  }
-  if (!Object.prototype.hasOwnProperty.call(properties, PAGE_OWNERSHIP_PROPERTY)) {
-    return null;
-  }
-  const property = properties[PAGE_OWNERSHIP_PROPERTY];
-  const value = isRecord4(property) ? property.value : void 0;
+function parseOwnershipProperty(pageId, response) {
+  const value = isRecord4(response) ? response.value : void 0;
   if (typeof value !== "object" || value === null || !("schemaVersion" in value) || value.schemaVersion !== 1 || !("destinationId" in value) || typeof value.destinationId !== "string" || value.destinationId.length === 0 || !("sourcePath" in value) || typeof value.sourcePath !== "string" || value.sourcePath.length === 0) {
-    throw new Error(`Confluence page ${page.id} has invalid ownership property data.`);
+    throw new Error(`Confluence page ${pageId} has invalid ownership property data.`);
   }
   return {
     schemaVersion: 1,

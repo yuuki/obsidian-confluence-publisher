@@ -17,31 +17,21 @@ function fakeTransport(responses: unknown[]): NodeHttpTransport {
   } as unknown as NodeHttpTransport;
 }
 
-const malformedOwnershipContainers: Array<[string, unknown]> = [
-  ['null metadata', null],
-  ['string metadata', 'invalid'],
-  ['array metadata', []],
-  ['null properties', { properties: null }],
-  ['string properties', { properties: 'invalid' }],
-  ['array properties', { properties: [] }],
-];
-
-const malformedOwnershipRows: Array<[string, unknown, 'get' | 'find']> = malformedOwnershipContainers
-  .flatMap(([label, metadata]) => [
-    [`getPage rejects ${label}`, metadata, 'get'] as [string, unknown, 'get'],
-    [`findPagesByTitle rejects ${label}`, metadata, 'find'] as [string, unknown, 'find'],
-  ]);
-
 describe('ConfluenceRepository', () => {
   it('returns all exact-title pages so the planner can verify parent identity', async () => {
-    const transport = fakeTransport([{
-      results: [
-        { id: 'one', title: 'Same', space: { key: 'DOC' }, ancestors: [{ id: '42' }], version: { number: 1 } },
-        { id: 'two', title: 'Same', space: { key: 'DOC' }, ancestors: [{ id: '77' }], version: { number: 1 } },
-      ],
-      size: 2,
-      _links: {},
-    }]);
+    const notFound = () => new TransportError('http', 'missing', 404);
+    const transport = fakeTransport([
+      {
+        results: [
+          { id: 'one', title: 'Same', space: { key: 'DOC' }, ancestors: [{ id: '42' }], version: { number: 1 } },
+          { id: 'two', title: 'Same', space: { key: 'DOC' }, ancestors: [{ id: '77' }], version: { number: 1 } },
+        ],
+        size: 2,
+        _links: {},
+      },
+      notFound(),
+      notFound(),
+    ]);
     const repository = new ConfluenceRepository(transport);
 
     const pages = await repository.findPagesByTitle('DOC', 'Same', signal());
@@ -76,19 +66,21 @@ describe('ConfluenceRepository', () => {
           ancestors: [{ id: 'root' }, { id: '42' }],
           version: { number: 3 },
           _links: { webui: '/pages/one' },
-          metadata: { properties: { 'obsidian-confluence-publisher': {
-            id: 'property-one',
-            value: { schemaVersion: 1, destinationId: 'docs', sourcePath: 'note.md' },
-          } } },
         }],
         size: 1,
         _links: { next: '/rest/api/content?start=1' },
+      },
+      {
+        id: 'property-one',
+        key: 'obsidian-confluence-publisher',
+        value: { schemaVersion: 1, destinationId: 'docs', sourcePath: 'note.md' },
       },
       {
         results: [{ id: 'two', title: 'Same', space: { key: 'DOC' }, ancestors: [], version: { number: 1 } }],
         size: 1,
         _links: {},
       },
+      new TransportError('http', 'missing', 404),
     ]);
 
     const pages = await new ConfluenceRepository(transport).findPagesByTitle('DOC', 'Same', signal());
@@ -100,47 +92,56 @@ describe('ConfluenceRepository', () => {
       }),
       expect.objectContaining({ id: 'two', parentPageId: null, ownership: null }),
     ]);
-    expect(transport.requestJson).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(transport.requestJson).toHaveBeenNthCalledWith(3, expect.objectContaining({
       path: '/rest/api/content?start=1',
     }));
   });
 
   it('rejects malformed ownership instead of treating the page as unowned', async () => {
-    const transport = fakeTransport([{
-      id: 'p', title: 'Page', space: { key: 'DOC' }, ancestors: [{ id: '42' }], version: { number: 1 },
-      metadata: { properties: { 'obsidian-confluence-publisher': {
-        id: 'property-p', value: { schemaVersion: 2, destinationId: 'docs', sourcePath: 'note.md' },
-      } } },
-    }]);
+    const transport = fakeTransport([
+      { id: 'p', title: 'Page', space: { key: 'DOC' }, ancestors: [{ id: '42' }], version: { number: 1 } },
+      {
+        id: 'property-p',
+        key: 'obsidian-confluence-publisher',
+        value: { schemaVersion: 2, destinationId: 'docs', sourcePath: 'note.md' },
+      },
+    ]);
 
     await expect(new ConfluenceRepository(transport).getPage('p', signal()))
       .rejects.toThrow('ownership');
   });
 
-  it.each(malformedOwnershipRows)('%s', async (_label, metadata, operation) => {
-    const page = { id: 'p', title: 'Page', version: { number: 1 }, metadata };
-    const response = operation === 'get'
-      ? page
-      : { results: [page], size: 1, _links: {} };
-    const repository = new ConfluenceRepository(fakeTransport([response]));
-
-    const request = operation === 'get'
-      ? repository.getPage('p', signal())
-      : repository.findPagesByTitle('DOC', 'Page', signal());
-    await expect(request).rejects.toThrow('ownership metadata');
-  });
-
   it.each(['get', 'find'] as const)('keeps absent ownership property valid for %s mapping', async (operation) => {
-    const page = { id: 'p', title: 'Page', version: { number: 1 }, metadata: { properties: {} } };
-    const response = operation === 'get'
-      ? page
-      : { results: [page], size: 1, _links: {} };
-    const repository = new ConfluenceRepository(fakeTransport([response]));
+    const page = { id: 'p', title: 'Page', version: { number: 1 } };
+    const notFound = new TransportError('http', 'missing', 404);
+    const responses = operation === 'get'
+      ? [page, notFound]
+      : [{ results: [page], size: 1, _links: {} }, notFound];
+    const repository = new ConfluenceRepository(fakeTransport(responses));
 
     const result = operation === 'get'
       ? await repository.getPage('p', signal())
       : (await repository.findPagesByTitle('DOC', 'Page', signal()))[0];
     expect(result?.ownership).toBeNull();
+  });
+
+  it.each([
+    ['getPage', (repository: ConfluenceRepository, requestSignal: AbortSignal) => repository.getPage('p', requestSignal), [
+      { id: 'p', title: 'Page', version: { number: 1 } },
+    ]],
+    ['findPagesByTitle', (repository: ConfluenceRepository, requestSignal: AbortSignal) => repository.findPagesByTitle('DOC', 'Page', requestSignal), [
+      { results: [{ id: 'p', title: 'Page', version: { number: 1 } }], size: 1, _links: {} },
+    ]],
+  ] as const)('propagates ownership property failures for %s', async (_operation, publish, responses) => {
+    const error = new TransportError('http', 'property failed', 500);
+    const transport = fakeTransport([...responses, error]);
+    const requestSignal = signal();
+
+    await expect(publish(new ConfluenceRepository(transport), requestSignal)).rejects.toBe(error);
+    expect(transport.requestJson).toHaveBeenLastCalledWith(expect.objectContaining({
+      path: '/rest/api/content/p/property/obsidian-confluence-publisher',
+      signal: requestSignal,
+    }));
   });
 
   it('rejects a page response whose required fields are malformed', async () => {
