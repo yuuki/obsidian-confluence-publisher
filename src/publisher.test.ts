@@ -6,6 +6,7 @@ import type {
 	ResolvedPage,
 } from './domain/publication';
 import type { NoteFileRef, NoteRepository } from './obsidian/note-repository';
+import { InvalidFrontmatterError } from './obsidian/note-repository';
 import { createCleanupSignal, mimeTypeForPath, Publisher } from './publisher';
 
 interface FakeOptions {
@@ -36,6 +37,65 @@ describe('Publisher', () => {
 
 		expect(remote.updatePage).not.toHaveBeenCalled();
 		expect(events).toContainEqual(expect.objectContaining({ type: 'failed', phase: 'page-resolution' }));
+		expect(events[events.length - 1]).toEqual({ type: 'complete', succeeded: 0, failed: 2 });
+	});
+
+	it('loads the vault link map before starting any remote write', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote);
+		vi.mocked(deps.notes.listPublished).mockRejectedValue(new Error('vault read failed'));
+		const events = await collect(new Publisher(deps).publish(
+			[file('first.md'), file('second.md')], destination(), signal(),
+		));
+
+		expect(remote.createPage).not.toHaveBeenCalled();
+		expect(remote.setPageOwnership).not.toHaveBeenCalled();
+		expect(remote.updatePage).not.toHaveBeenCalled();
+		expect(events[events.length - 1]).toEqual({ type: 'complete', succeeded: 0, failed: 2 });
+	});
+
+	it('keeps selected invalid frontmatter as a preflight failure', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote);
+		vi.mocked(deps.notes.read).mockImplementation(async (ref) => {
+			if (ref.path === 'bad.md') throw new InvalidFrontmatterError(ref.path);
+			return {
+				path: ref.path, basename: ref.basename, raw: '# valid', body: '# valid',
+				frontmatter: { title: 'Valid' },
+			};
+		});
+		const events = await collect(new Publisher(deps).publish(
+			[file('valid.md'), file('bad.md')], destination(), signal(),
+		));
+
+		expect(remote.findPagesByTitle).not.toHaveBeenCalled();
+		expect(remote.createPage).not.toHaveBeenCalled();
+		expect(events).toContainEqual(expect.objectContaining({
+			type: 'failed', title: 'bad.md', phase: 'preflight',
+		}));
+		expect(events[events.length - 1]).toEqual({ type: 'complete', succeeded: 0, failed: 2 });
+	});
+
+	it('counts pages instead of repeated unresolved-image issues', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote, { bodyByPath: { 'first.md': '![[a.png]] ![[b.png]]' } });
+		vi.mocked(deps.notes.resolveLink).mockReturnValue(null);
+		const events = await collect(new Publisher(deps).publish(
+			[file('first.md')], destination(), signal(),
+		));
+
+		expect(events.filter((event) => event.type === 'failed')).toHaveLength(2);
+		expect(events[events.length - 1]).toEqual({ type: 'complete', succeeded: 0, failed: 1 });
+	});
+
+	it('counts all selected pages when a global preflight issue stops publication', async () => {
+		const events = await collect(new Publisher(dependencies(fakeRepository())).publish(
+			[file('first.md'), file('second.md')],
+			{ ...destination(), spaceKey: '' },
+			signal(),
+		));
+
+		expect(events[events.length - 1]).toEqual({ type: 'complete', succeeded: 0, failed: 2 });
 	});
 
 	it('finishes ownership for every created page before any content update', async () => {
@@ -249,6 +309,21 @@ describe('Publisher', () => {
 		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).toContain('ri:content-title="Third page"');
 	});
 
+	it('uses the normalized destination space key during second-pass conversion', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[third]]' },
+			published: [{ path: 'third.md', title: 'Third page', record: publicationRecord() }],
+		});
+		await collect(new Publisher(deps).publish(
+			[file('first.md')], { ...destination(), spaceKey: ' DOC ' }, signal(),
+		));
+
+		const storage = vi.mocked(remote.updatePage).mock.calls[0][2];
+		expect(storage).toContain('ri:space-key="DOC"');
+		expect(storage).not.toContain('ri:space-key=" DOC "');
+	});
+
 	it('writes publication metadata only after a successful page update', async () => {
 		const remote = fakeRepository({ updateFailureForPage: 'page-1' });
 		const deps = dependencies(remote);
@@ -260,6 +335,25 @@ describe('Publisher', () => {
 		await collect(new Publisher(successfulDeps).publish([file('first.md')], destination(), signal()));
 		expect(vi.mocked(successfulRemote.updatePage).mock.invocationCallOrder[0])
 			.toBeLessThan((successfulDeps.notes.writePublication as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+	});
+
+	it('reports a local metadata write failure even if abort happens after the remote update', async () => {
+		const controller = new AbortController();
+		const remote = fakeRepository();
+		const deps = dependencies(remote);
+		vi.mocked(deps.notes.writePublication).mockImplementation(async () => {
+			controller.abort();
+			throw new Error('local metadata write failed');
+		});
+		const events = await collect(new Publisher(deps).publish(
+			[file('first.md')], destination(), controller.signal,
+		));
+
+		expect(remote.updatePage).toHaveBeenCalledTimes(1);
+		expect(events).toContainEqual(expect.objectContaining({
+			type: 'failed', phase: 'content-update', error: 'local metadata write failed',
+		}));
+		expect(events[events.length - 1]).toEqual({ type: 'complete', succeeded: 0, failed: 1 });
 	});
 
 	it.each([

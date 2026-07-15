@@ -80,14 +80,14 @@ export class Publisher {
 				for (const error of inputErrors) {
 					yield { type: 'failed', title: error.title, phase: 'preflight', error: error.message };
 				}
-				yield { type: 'complete', succeeded: 0, failed: inputErrors.length };
+				yield completeEvent(files.length, 0);
 				return;
 			}
 
 			const prepared = await this.prepareCandidates(files, destination, signal);
 			if ('failures' in prepared) {
 				for (const failure of prepared.failures) yield failure;
-				yield { type: 'complete', succeeded: 0, failed: prepared.failures.length };
+				yield completeEvent(files.length, 0);
 				return;
 			}
 
@@ -107,10 +107,11 @@ export class Publisher {
 						error: issue.message,
 					};
 				}
-				yield { type: 'complete', succeeded: 0, failed: plan.issues.length };
+				yield completeEvent(files.length, 0);
 				return;
 			}
 
+			const pageTitles = await this.loadPublishedPageTitles(plan.snapshot, signal);
 			yield { type: 'planned', total: plan.pages.length };
 			const resolved: PreparedPage[] = [];
 			for (const planned of plan.pages) {
@@ -129,10 +130,10 @@ export class Publisher {
 							signal,
 						);
 					} catch (error) {
-						if (isAbort(error, signal)) throw error;
+						if (isAbort(error)) throw error;
 						failed++;
 						yield resolutionFailure(planned.note.title, error);
-						yield { type: 'complete', succeeded, failed };
+						yield completeEvent(files.length, succeeded);
 						return;
 					}
 
@@ -150,12 +151,12 @@ export class Publisher {
 								error: orphanedPageError(page, ownershipError, cleanupError, plan.snapshot.baseUrl),
 							};
 						}
-						if (isAbort(ownershipError, signal)) throw ownershipError;
+						if (isAbort(ownershipError)) throw ownershipError;
 						if (cleanupError === null) {
 							failed++;
 							yield resolutionFailure(planned.note.title, ownershipError);
 						}
-						yield { type: 'complete', succeeded, failed };
+						yield completeEvent(files.length, succeeded);
 						return;
 					}
 					yield { type: 'page-created', title: planned.note.title };
@@ -169,17 +170,17 @@ export class Publisher {
 						signal.throwIfAborted();
 						await this.dependencies.repository.setPageOwnership(pageId, ownership, signal);
 					} catch (error) {
-						if (isAbort(error, signal)) throw error;
+						if (isAbort(error)) throw error;
 						failed++;
 						yield resolutionFailure(planned.note.title, error);
-						yield { type: 'complete', succeeded, failed };
+						yield completeEvent(files.length, succeeded);
 						return;
 					}
 				}
 				resolved.push({ file, planned, pageId, webui: null });
 			}
 
-			const pageTitles = await this.buildPageTitles(plan.snapshot, resolved, signal);
+			for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
 			for (const item of resolved) {
 				signal.throwIfAborted();
 				try {
@@ -187,7 +188,7 @@ export class Publisher {
 						selectPublishContent(item.planned.note, this.dependencies.settings.stripFrontmatter),
 						{
 							sourcePath: item.planned.note.path,
-							spaceKey: destination.spaceKey,
+							spaceKey: plan.snapshot.spaceKey,
 							pageTitles,
 							resolveLink: (target, sourcePath) =>
 								this.dependencies.notes.resolveLink(target, sourcePath),
@@ -236,7 +237,7 @@ export class Publisher {
 					succeeded++;
 					yield { type: 'page-updated', title: item.planned.note.title };
 				} catch (error) {
-					if (isAbort(error, signal)) throw error;
+					if (isAbort(error)) throw error;
 					failed++;
 					yield {
 						type: 'failed',
@@ -247,15 +248,15 @@ export class Publisher {
 				}
 			}
 
-			yield { type: 'complete', succeeded, failed };
+			yield completeEvent(files.length, succeeded);
 		} catch (error) {
-			if (isAbort(error, signal)) {
+			if (isAbort(error)) {
 				yield { type: 'cancelled', succeeded, failed };
 				return;
 			}
 			failed++;
 			yield { type: 'failed', title: null, phase: 'preflight', error: errorMessage(error) };
-			yield { type: 'complete', succeeded, failed };
+			yield completeEvent(files.length, succeeded);
 		}
 	}
 
@@ -296,7 +297,7 @@ export class Publisher {
 				});
 				filesByPath.set(note.path, file);
 			} catch (error) {
-				if (isAbort(error, signal)) throw error;
+				if (isAbort(error)) throw error;
 				failures.push({
 					type: 'failed',
 					title: file.path,
@@ -308,9 +309,8 @@ export class Publisher {
 		return failures.length > 0 ? { failures } : { candidates, filesByPath };
 	}
 
-	private async buildPageTitles(
+	private async loadPublishedPageTitles(
 		destination: DestinationSnapshot,
-		resolved: PreparedPage[],
 		signal: AbortSignal,
 	): Promise<Map<string, string>> {
 		signal.throwIfAborted();
@@ -323,7 +323,7 @@ export class Publisher {
 				pageTitles.set(published.path, published.title);
 			}
 		}
-		for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
+		signal.throwIfAborted();
 		return pageTitles;
 	}
 
@@ -439,8 +439,16 @@ export function mimeTypeForPath(path: string): string {
 	} as Record<string, string>)[extension] ?? 'application/octet-stream';
 }
 
-function isAbort(error: unknown, signal: AbortSignal): boolean {
-	return signal.aborted || (error instanceof DOMException && error.name === 'AbortError');
+function isAbort(error: unknown): boolean {
+	if (error instanceof DOMException && error.name === 'AbortError') return true;
+	return typeof error === 'object'
+		&& error !== null
+		&& 'code' in error
+		&& error.code === 'aborted';
+}
+
+function completeEvent(total: number, succeeded: number): Extract<ProgressEvent, { type: 'complete' }> {
+	return { type: 'complete', succeeded, failed: Math.max(0, total - succeeded) };
 }
 
 function errorMessage(error: unknown): string {

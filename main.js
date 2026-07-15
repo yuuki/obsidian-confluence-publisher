@@ -3549,9 +3549,16 @@ function isExpectedOwnership(ownership, destinationId, sourcePath) {
 var import_obsidian5 = require("obsidian");
 var FRONTMATTER_START_RE = /^---\r?\n/;
 var FRONTMATTER_RE = /^---\r?\n([\s\S]*?)^---[ \t]*(?:\r?\n|$)/m;
+var InvalidFrontmatterError = class extends Error {
+  constructor(path, message) {
+    super(`Invalid YAML frontmatter in ${path}.${message ? ` ${message}` : ""}`);
+    this.path = path;
+    this.name = "InvalidFrontmatterError";
+  }
+};
 function parseNoteSource(path, basename, raw) {
   if (FRONTMATTER_START_RE.test(raw) && !FRONTMATTER_RE.test(raw)) {
-    throw new Error(`Invalid YAML frontmatter in ${path}.`);
+    throw new InvalidFrontmatterError(path);
   }
   const match = FRONTMATTER_RE.exec(raw);
   if (match === null) return { path, basename, raw, frontmatter: {}, body: raw };
@@ -3559,11 +3566,10 @@ function parseNoteSource(path, basename, raw) {
   try {
     parsed = (0, import_obsidian5.parseYaml)(match[1]);
   } catch (error) {
-    const detail = error instanceof Error ? ` ${error.message}` : "";
-    throw new Error(`Invalid YAML frontmatter in ${path}.${detail}`);
+    throw new InvalidFrontmatterError(path, error instanceof Error ? error.message : void 0);
   }
   if (parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) {
-    throw new Error(`YAML frontmatter in ${path} must be an object.`);
+    throw new InvalidFrontmatterError(path, "Frontmatter must be an object.");
   }
   return {
     path,
@@ -3594,7 +3600,8 @@ var ObsidianNoteRepository = class {
   async listPublished(destination, titleSource) {
     const published = [];
     for (const file of this.listMarkdownFiles()) {
-      const note = await this.read(file);
+      const note = await this.readForVaultScan(file);
+      if (note === null) continue;
       const record = readPublication(note.frontmatter, destination.destinationId);
       if (record !== null && isSameDestination(record, destination)) {
         published.push({ path: note.path, title: resolveNoteTitle(note, titleSource), record });
@@ -3605,7 +3612,8 @@ var ObsidianNoteRepository = class {
   async listPublicationCandidates(destinationId) {
     const candidates = [];
     for (const file of this.listMarkdownFiles()) {
-      const note = await this.read(file);
+      const note = await this.readForVaultScan(file);
+      if (note === null) continue;
       if (readPublication(note.frontmatter, destinationId) !== null || readLegacyPublication(note.frontmatter) !== null) candidates.push(file);
     }
     return candidates;
@@ -3632,6 +3640,14 @@ var ObsidianNoteRepository = class {
     }
     return file;
   }
+  async readForVaultScan(file) {
+    try {
+      return await this.read(file);
+    } catch (error) {
+      if (error instanceof InvalidFrontmatterError) return null;
+      throw error;
+    }
+  }
 };
 function toFileRef(file) {
   return { path: file.path, basename: file.basename, extension: file.extension };
@@ -3655,13 +3671,13 @@ var Publisher = class {
         for (const error of inputErrors) {
           yield { type: "failed", title: error.title, phase: "preflight", error: error.message };
         }
-        yield { type: "complete", succeeded: 0, failed: inputErrors.length };
+        yield completeEvent(files.length, 0);
         return;
       }
       const prepared = await this.prepareCandidates(files, destination, signal);
       if ("failures" in prepared) {
         for (const failure of prepared.failures) yield failure;
-        yield { type: "complete", succeeded: 0, failed: prepared.failures.length };
+        yield completeEvent(files.length, 0);
         return;
       }
       const plan = await buildPublicationPlan({
@@ -3680,9 +3696,10 @@ var Publisher = class {
             error: issue.message
           };
         }
-        yield { type: "complete", succeeded: 0, failed: plan.issues.length };
+        yield completeEvent(files.length, 0);
         return;
       }
+      const pageTitles = await this.loadPublishedPageTitles(plan.snapshot, signal);
       yield { type: "planned", total: plan.pages.length };
       const resolved = [];
       for (const planned of plan.pages) {
@@ -3701,10 +3718,10 @@ var Publisher = class {
               signal
             );
           } catch (error) {
-            if (isAbort(error, signal)) throw error;
+            if (isAbort(error)) throw error;
             failed++;
             yield resolutionFailure(planned.note.title, error);
-            yield { type: "complete", succeeded, failed };
+            yield completeEvent(files.length, succeeded);
             return;
           }
           try {
@@ -3721,12 +3738,12 @@ var Publisher = class {
                 error: orphanedPageError(page, ownershipError, cleanupError, plan.snapshot.baseUrl)
               };
             }
-            if (isAbort(ownershipError, signal)) throw ownershipError;
+            if (isAbort(ownershipError)) throw ownershipError;
             if (cleanupError === null) {
               failed++;
               yield resolutionFailure(planned.note.title, ownershipError);
             }
-            yield { type: "complete", succeeded, failed };
+            yield completeEvent(files.length, succeeded);
             return;
           }
           yield { type: "page-created", title: planned.note.title };
@@ -3739,16 +3756,16 @@ var Publisher = class {
             signal.throwIfAborted();
             await this.dependencies.repository.setPageOwnership(pageId, ownership, signal);
           } catch (error) {
-            if (isAbort(error, signal)) throw error;
+            if (isAbort(error)) throw error;
             failed++;
             yield resolutionFailure(planned.note.title, error);
-            yield { type: "complete", succeeded, failed };
+            yield completeEvent(files.length, succeeded);
             return;
           }
         }
         resolved.push({ file, planned, pageId, webui: null });
       }
-      const pageTitles = await this.buildPageTitles(plan.snapshot, resolved, signal);
+      for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
       for (const item of resolved) {
         signal.throwIfAborted();
         try {
@@ -3756,7 +3773,7 @@ var Publisher = class {
             selectPublishContent(item.planned.note, this.dependencies.settings.stripFrontmatter),
             {
               sourcePath: item.planned.note.path,
-              spaceKey: destination.spaceKey,
+              spaceKey: plan.snapshot.spaceKey,
               pageTitles,
               resolveLink: (target, sourcePath) => this.dependencies.notes.resolveLink(target, sourcePath)
             }
@@ -3802,7 +3819,7 @@ var Publisher = class {
           succeeded++;
           yield { type: "page-updated", title: item.planned.note.title };
         } catch (error) {
-          if (isAbort(error, signal)) throw error;
+          if (isAbort(error)) throw error;
           failed++;
           yield {
             type: "failed",
@@ -3812,15 +3829,15 @@ var Publisher = class {
           };
         }
       }
-      yield { type: "complete", succeeded, failed };
+      yield completeEvent(files.length, succeeded);
     } catch (error) {
-      if (isAbort(error, signal)) {
+      if (isAbort(error)) {
         yield { type: "cancelled", succeeded, failed };
         return;
       }
       failed++;
       yield { type: "failed", title: null, phase: "preflight", error: errorMessage(error) };
-      yield { type: "complete", succeeded, failed };
+      yield completeEvent(files.length, succeeded);
     }
   }
   async prepareCandidates(files, destination, signal) {
@@ -3853,7 +3870,7 @@ var Publisher = class {
         });
         filesByPath.set(note.path, file);
       } catch (error) {
-        if (isAbort(error, signal)) throw error;
+        if (isAbort(error)) throw error;
         failures.push({
           type: "failed",
           title: file.path,
@@ -3864,7 +3881,7 @@ var Publisher = class {
     }
     return failures.length > 0 ? { failures } : { candidates, filesByPath };
   }
-  async buildPageTitles(destination, resolved, signal) {
+  async loadPublishedPageTitles(destination, signal) {
     signal.throwIfAborted();
     const pageTitles = /* @__PURE__ */ new Map();
     for (const published of await this.dependencies.notes.listPublished(
@@ -3875,7 +3892,7 @@ var Publisher = class {
         pageTitles.set(published.path, published.title);
       }
     }
-    for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
+    signal.throwIfAborted();
     return pageTitles;
   }
   async rollbackCreatedPage(pageId) {
@@ -3964,8 +3981,12 @@ function mimeTypeForPath(path) {
     webp: "image/webp"
   }[extension]) != null ? _a : "application/octet-stream";
 }
-function isAbort(error, signal) {
-  return signal.aborted || error instanceof DOMException && error.name === "AbortError";
+function isAbort(error) {
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  return typeof error === "object" && error !== null && "code" in error && error.code === "aborted";
+}
+function completeEvent(total, succeeded) {
+  return { type: "complete", succeeded, failed: Math.max(0, total - succeeded) };
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);

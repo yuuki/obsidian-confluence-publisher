@@ -39,9 +39,16 @@ export interface NoteRepository {
 
 export type PublicationTitleSource = 'frontmatter' | 'filename';
 
+export class InvalidFrontmatterError extends Error {
+	constructor(readonly path: string, message?: string) {
+		super(`Invalid YAML frontmatter in ${path}.${message ? ` ${message}` : ''}`);
+		this.name = 'InvalidFrontmatterError';
+	}
+}
+
 export function parseNoteSource(path: string, basename: string, raw: string): NoteInput {
 	if (FRONTMATTER_START_RE.test(raw) && !FRONTMATTER_RE.test(raw)) {
-		throw new Error(`Invalid YAML frontmatter in ${path}.`);
+		throw new InvalidFrontmatterError(path);
 	}
 	const match = FRONTMATTER_RE.exec(raw);
 	if (match === null) return { path, basename, raw, frontmatter: {}, body: raw };
@@ -50,11 +57,10 @@ export function parseNoteSource(path: string, basename: string, raw: string): No
 	try {
 		parsed = parseYaml(match[1]);
 	} catch (error) {
-		const detail = error instanceof Error ? ` ${error.message}` : '';
-		throw new Error(`Invalid YAML frontmatter in ${path}.${detail}`);
+		throw new InvalidFrontmatterError(path, error instanceof Error ? error.message : undefined);
 	}
 	if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {
-		throw new Error(`YAML frontmatter in ${path} must be an object.`);
+		throw new InvalidFrontmatterError(path, 'Frontmatter must be an object.');
 	}
 	return {
 		path,
@@ -98,7 +104,8 @@ export class ObsidianNoteRepository implements NoteRepository {
 	}>> {
 		const published: Array<{ path: string; title: string; record: PublicationRecord }> = [];
 		for (const file of this.listMarkdownFiles()) {
-			const note = await this.read(file);
+			const note = await this.readForVaultScan(file);
+			if (note === null) continue;
 			const record = readPublication(note.frontmatter, destination.destinationId);
 			if (record !== null && isSameDestination(record, destination)) {
 				published.push({ path: note.path, title: resolveNoteTitle(note, titleSource), record });
@@ -110,7 +117,8 @@ export class ObsidianNoteRepository implements NoteRepository {
 	async listPublicationCandidates(destinationId: string): Promise<NoteFileRef[]> {
 		const candidates: NoteFileRef[] = [];
 		for (const file of this.listMarkdownFiles()) {
-			const note = await this.read(file);
+			const note = await this.readForVaultScan(file);
+			if (note === null) continue;
 			if (
 				readPublication(note.frontmatter, destinationId) !== null
 				|| readLegacyPublication(note.frontmatter) !== null
@@ -142,6 +150,15 @@ export class ObsidianNoteRepository implements NoteRepository {
 			throw new Error(`Vault file not found: ${path}`);
 		}
 		return file as TFile;
+	}
+
+	private async readForVaultScan(file: NoteFileRef): Promise<NoteInput | null> {
+		try {
+			return await this.read(file);
+		} catch (error) {
+			if (error instanceof InvalidFrontmatterError) return null;
+			throw error;
+		}
 	}
 }
 
