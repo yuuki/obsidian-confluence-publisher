@@ -17,6 +17,21 @@ function fakeTransport(responses: unknown[]): NodeHttpTransport {
   } as unknown as NodeHttpTransport;
 }
 
+const malformedOwnershipContainers: Array<[string, unknown]> = [
+  ['null metadata', null],
+  ['string metadata', 'invalid'],
+  ['array metadata', []],
+  ['null properties', { properties: null }],
+  ['string properties', { properties: 'invalid' }],
+  ['array properties', { properties: [] }],
+];
+
+const malformedOwnershipRows: Array<[string, unknown, 'get' | 'find']> = malformedOwnershipContainers
+  .flatMap(([label, metadata]) => [
+    [`getPage rejects ${label}`, metadata, 'get'] as [string, unknown, 'get'],
+    [`findPagesByTitle rejects ${label}`, metadata, 'find'] as [string, unknown, 'find'],
+  ]);
+
 describe('ConfluenceRepository', () => {
   it('returns all exact-title pages so the planner can verify parent identity', async () => {
     const transport = fakeTransport([{
@@ -100,6 +115,32 @@ describe('ConfluenceRepository', () => {
 
     await expect(new ConfluenceRepository(transport).getPage('p', signal()))
       .rejects.toThrow('ownership');
+  });
+
+  it.each(malformedOwnershipRows)('%s', async (_label, metadata, operation) => {
+    const page = { id: 'p', title: 'Page', version: { number: 1 }, metadata };
+    const response = operation === 'get'
+      ? page
+      : { results: [page], size: 1, _links: {} };
+    const repository = new ConfluenceRepository(fakeTransport([response]));
+
+    const request = operation === 'get'
+      ? repository.getPage('p', signal())
+      : repository.findPagesByTitle('DOC', 'Page', signal());
+    await expect(request).rejects.toThrow('ownership metadata');
+  });
+
+  it.each(['get', 'find'] as const)('keeps absent ownership property valid for %s mapping', async (operation) => {
+    const page = { id: 'p', title: 'Page', version: { number: 1 }, metadata: { properties: {} } };
+    const response = operation === 'get'
+      ? page
+      : { results: [page], size: 1, _links: {} };
+    const repository = new ConfluenceRepository(fakeTransport([response]));
+
+    const result = operation === 'get'
+      ? await repository.getPage('p', signal())
+      : (await repository.findPagesByTitle('DOC', 'Page', signal()))[0];
+    expect(result?.ownership).toBeNull();
   });
 
   it('rejects a page response whose required fields are malformed', async () => {

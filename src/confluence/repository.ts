@@ -212,11 +212,22 @@ function resolvePage(
 }
 
 function readOwnership(page: ConfluencePageResponse): PageOwnership | null {
-  const properties = page.metadata?.properties;
-  if (properties === undefined || !Object.prototype.hasOwnProperty.call(properties, PAGE_OWNERSHIP_PROPERTY)) {
+  const metadata: unknown = page.metadata;
+  if (metadata === undefined) return null;
+  if (!isRecord(metadata) || Array.isArray(metadata)) {
+    throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
+  }
+
+  const properties = metadata.properties;
+  if (properties === undefined) return null;
+  if (!isRecord(properties) || Array.isArray(properties)) {
+    throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(properties, PAGE_OWNERSHIP_PROPERTY)) {
     return null;
   }
-  const value = properties[PAGE_OWNERSHIP_PROPERTY]?.value;
+  const property = properties[PAGE_OWNERSHIP_PROPERTY];
+  const value = isRecord(property) ? property.value : undefined;
   if (
     typeof value !== 'object'
     || value === null
