@@ -2,17 +2,27 @@
   "name": "obsidian-confluence-publisher",
   "version": "0.1.0",
   "description": "Publish Obsidian notes to Confluence Server/DC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yuuki/obsidian-confluence-publisher.git"
+  },
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "node esbuild.config.mjs production"
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:version": "node scripts/verify-version.mjs",
+    "check": "npm run typecheck && npm test && npm run verify:version && npm run build"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "esbuild": "^0.21.0",
+    "esbuild": "^0.28.1",
     "obsidian": "^1.7.2",
     "typescript": "^5.5.0",
-    "marked": "^14.0.0"
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "marked": "^14.0.0"

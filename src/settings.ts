@@ -1,54 +1,12 @@
+import { randomUUID } from 'crypto';
 import { App, PluginSettingTab, Setting, Plugin } from 'obsidian';
+import type { Destination } from './domain/publication';
+import type { ConfluencePublisherSettings } from './domain/settings';
+import { validateDestination } from './domain/validation';
 
-export interface ConfluenceDestination {
-	label: string;
-	spaceKey: string;
-	parentPageId: string;
-}
-
-export interface ConfluencePublisherSettings {
-	confluenceUrl: string;
-	destinations: ConfluenceDestination[];
-	authType: 'pat' | 'basic';
-	token: string;
-	username: string;
-	password: string;
-	stripFrontmatter: boolean;
-	titleSource: 'frontmatter' | 'filename';
-}
-
-export const DEFAULT_SETTINGS: ConfluencePublisherSettings = {
-	confluenceUrl: '',
-	destinations: [],
-	authType: 'pat',
-	token: '',
-	username: '',
-	password: '',
-	stripFrontmatter: true,
-	titleSource: 'frontmatter',
-};
-
-/** Migrate legacy settings that had spaceKey/parentPageId at top level. */
-export function migrateSettings(data: Record<string, unknown>): ConfluencePublisherSettings {
-	const settings = Object.assign({}, DEFAULT_SETTINGS, data) as ConfluencePublisherSettings & {
-		spaceKey?: string;
-		parentPageId?: string;
-	};
-	if (!settings.destinations) {
-		settings.destinations = [];
-	}
-	// Migrate old single spaceKey/parentPageId to destinations[0]
-	if (settings.spaceKey && settings.parentPageId && settings.destinations.length === 0) {
-		settings.destinations.push({
-			label: settings.spaceKey,
-			spaceKey: settings.spaceKey,
-			parentPageId: settings.parentPageId,
-		});
-	}
-	delete settings.spaceKey;
-	delete settings.parentPageId;
-	return settings;
-}
+export { DEFAULT_SETTINGS, migrateSettings } from './domain/settings';
+export type { ConfluencePublisherSettings } from './domain/settings';
+export type ConfluenceDestination = Destination;
 
 export class ConfluenceSettingTab extends PluginSettingTab {
 	private plugin: Plugin & { settings: ConfluencePublisherSettings };
@@ -115,6 +73,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					.setCta()
 					.onClick(async () => {
 						this.plugin.settings.destinations.push({
+							id: randomUUID(),
 							label: '',
 							spaceKey: '',
 							parentPageId: '',
@@ -139,6 +98,17 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			row.style.borderRadius = '6px';
 			row.style.padding = '8px 12px';
 			row.style.marginBottom = '8px';
+			const validationEl = row.createDiv({ cls: 'setting-item-description' });
+			const updateValidation = (): void => {
+				const errors = validateDestination(dest).filter((error) =>
+					error === 'Space key is required.' || error === 'Parent page ID is required.',
+				);
+				validationEl.textContent = errors.join(' ');
+				validationEl.style.color = errors.length > 0
+					? 'var(--text-error)'
+					: '';
+			};
+			updateValidation();
 
 			new Setting(row)
 				.setName('Label')
@@ -160,6 +130,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 						.setValue(dest.spaceKey)
 						.onChange(async (value) => {
 							dest.spaceKey = value.trim();
+							updateValidation();
 							await this.plugin.saveData(this.plugin.settings);
 						}),
 				);
@@ -172,6 +143,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 						.setValue(dest.parentPageId)
 						.onChange(async (value) => {
 							dest.parentPageId = value.trim();
+							updateValidation();
 							await this.plugin.saveData(this.plugin.settings);
 						}),
 				);

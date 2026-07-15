@@ -208,14 +208,15 @@ export class FileSelectModal extends Modal {
       cls: 'confluence-publish-btn mod-cta',
     });
     this.submitBtn.addEventListener('click', () => {
-      if (this.selectedFiles.size === 0) return;
+      const files = Array.from(this.selectedFiles).filter(isMarkdownFile);
+      if (files.length === 0) return;
       this.close();
-      this.onSubmit(Array.from(this.selectedFiles));
+      this.onSubmit(files);
     });
 
     // Pre-select the active file
     const activeFile = this.app.workspace.getActiveFile();
-    if (activeFile) {
+    if (activeFile && isMarkdownFile(activeFile)) {
       this.selectedFiles.add(activeFile);
     }
 
@@ -430,6 +431,7 @@ export class FileSelectModal extends Modal {
    * Render a single file row with a checkbox, file name, and path.
    */
   private renderFileItem(container: HTMLElement, file: TFile): void {
+    if (!isMarkdownFile(file)) return;
     const row = container.createDiv({ cls: 'confluence-file-item' });
     row.setAttribute('role', 'listitem');
 
@@ -482,4 +484,8 @@ export class FileSelectModal extends Modal {
       this.styleEl.remove();
     }
   }
+}
+
+function isMarkdownFile(file: TFile): boolean {
+  return file.extension.toLowerCase() === 'md';
 }

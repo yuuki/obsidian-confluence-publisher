@@ -7,11 +7,12 @@
     "target": "ES2018",
     "allowJs": true,
     "noImplicitAny": true,
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "importHelpers": true,
     "isolatedModules": true,
     "strictNullChecks": true,
-    "lib": ["DOM", "ES2018", "ES2021.String"]
+    "lib": ["DOM", "ES2018", "ES2021.String"],
+    "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "scripts/**/*.mjs", "vitest.config.ts"]
 }
