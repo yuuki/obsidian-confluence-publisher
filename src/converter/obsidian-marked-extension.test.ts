@@ -90,6 +90,30 @@ describe('Obsidian marked extension', () => {
 		]);
 	});
 
+	it.each([
+		{ opening: '```md', closing: '```' },
+		{ opening: '~~~~', closing: '~~~~' },
+	])('keeps callout-looking lines inside a $opening fence', ({ opening, closing }) => {
+		const markdown = [
+			'> [!NOTE] Code',
+			`> ${opening}`,
+			'> [!WARNING]',
+			'> [[InsideCode]] ![[inside.png]]',
+			`> ${closing}`,
+			'> [[AfterCode]]',
+		].join('\n');
+
+		const parsed = parseObsidianMarkdown(markdown);
+		const walked = walkObsidianTokens(parsed.tokens);
+
+		expect(walked.callouts).toHaveLength(1);
+		expect(walked.wikilinks).toMatchObject([{ target: 'AfterCode' }]);
+		expect(walked.images).toEqual([]);
+		const code = findToken(walked.callouts[0].tokens, 'code') as Tokens.Code;
+		expect(code.raw).toContain('[[InsideCode]] ![[inside.png]]');
+		expect(code.text).toContain('[[InsideCode]] ![[inside.png]]');
+	});
+
 	it('parses fold markers, omitted titles, and an empty body at EOF', () => {
 		const markdown = [
 			'> [!TIP]+',
@@ -124,6 +148,47 @@ describe('Obsidian marked extension', () => {
 		]);
 		expect(parsed.imageTokens).toEqual(images);
 		expect(wikilinks).toEqual([]);
+	});
+
+	it('falls back to alt text when a numeric image width overflows', () => {
+		const overflow = '9'.repeat(400);
+		const markdown = [
+			'![[normal.png|600]]',
+			'![[zero.png|0]]',
+			`![[overflow.png|${overflow}]]`,
+		].join(' ');
+
+		const { images } = walkObsidianTokens(parseObsidianMarkdown(markdown).tokens);
+
+		expect(images).toMatchObject([
+			{ target: 'normal.png', width: 600, alt: null },
+			{ target: 'zero.png', width: 0, alt: null },
+			{ target: 'overflow.png', width: null, alt: overflow },
+		]);
+		expect(images[2].width).not.toBe(Infinity);
+		expect(Number.isFinite(images[2].width)).toBe(false);
+	});
+
+	it('rejects empty and malformed wikilink bodies but keeps a same-page heading', () => {
+		const markdown = '[[]] ![[]] [[#]] [[|alias]] [[#Heading]]';
+		const { wikilinks, images } = walkObsidianTokens(
+			parseObsidianMarkdown(markdown).tokens,
+		);
+
+		expect(wikilinks).toMatchObject([
+			{ target: '', heading: 'Heading', alias: null, embed: false },
+		]);
+		expect(images).toEqual([]);
+	});
+
+	it('does not let an unterminated wikilink swallow a nested valid image', () => {
+		const markdown = '[[unterminated ![[also.png]]';
+		const { wikilinks, images } = walkObsidianTokens(
+			parseObsidianMarkdown(markdown).tokens,
+		);
+
+		expect(wikilinks).toEqual([]);
+		expect(images).toMatchObject([{ target: 'also.png' }]);
 	});
 
 	it('treats note embeds as wikilinks and splits headings and aliases', () => {

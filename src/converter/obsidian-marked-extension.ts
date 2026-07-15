@@ -15,6 +15,11 @@ const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|svg|webp|bmp)$/i;
 const CALLOUT_START = /^>[ \t]?\[!(\w+)\]([+-])?[ \t]*(.*?)(\r?\n|$)/;
 const NEXT_CALLOUT = /^>[ \t]?\[!\w+\]/;
 
+interface MarkdownFence {
+	marker: '`' | '~';
+	length: number;
+}
+
 function nullablePart(value: string | undefined): string | null {
 	return value ? value : null;
 }
@@ -34,6 +39,24 @@ function isImageTarget(target: string): boolean {
 	return IMAGE_EXTENSION.test(target);
 }
 
+function openingFence(line: string): MarkdownFence | null {
+	const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+	if (!match) {
+		return null;
+	}
+	return {
+		marker: match[1][0] as MarkdownFence['marker'],
+		length: match[1].length,
+	};
+}
+
+function closesFence(line: string, fence: MarkdownFence): boolean {
+	const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+	return match !== null
+		&& match[1][0] === fence.marker
+		&& match[1].length >= fence.length;
+}
+
 const calloutExtension: TokenizerAndRendererExtension = {
 	name: 'obsidian-callout',
 	level: 'block',
@@ -49,18 +72,30 @@ const calloutExtension: TokenizerAndRendererExtension = {
 		let raw = header[0];
 		let body = '';
 		let offset = raw.length;
+		let fence: MarkdownFence | null = null;
 		while (offset < src.length) {
 			const remaining = src.slice(offset);
-			if (!remaining.startsWith('>') || NEXT_CALLOUT.test(remaining)) {
+			if (!remaining.startsWith('>')) {
 				break;
 			}
 
 			const newline = remaining.indexOf('\n');
 			const lineLength = newline === -1 ? remaining.length : newline + 1;
 			const line = remaining.slice(0, lineLength);
+			const bodyLine = line.replace(/^>[ \t]?/, '');
+			const bodyLineWithoutEnding = bodyLine.replace(/\r?\n$/, '');
+			if (fence === null && NEXT_CALLOUT.test(remaining)) {
+				break;
+			}
 			raw += line;
-			body += line.replace(/^>[ \t]?/, '');
+			body += bodyLine;
 			offset += lineLength;
+
+			if (fence === null) {
+				fence = openingFence(bodyLineWithoutEnding);
+			} else if (closesFence(bodyLineWithoutEnding, fence)) {
+				fence = null;
+			}
 		}
 
 		const marker = header[2];
@@ -89,17 +124,25 @@ const imageExtension: TokenizerAndRendererExtension = {
 			return undefined;
 		}
 
-		const { target, alias } = splitAlias(match[1]);
+		const body = match[1];
+		if (!body || body.includes('[[')) {
+			return undefined;
+		}
+
+		const { target, alias } = splitAlias(body);
 		if (!isImageTarget(target)) {
 			return undefined;
 		}
 
-		const hasWidth = alias !== null && /^\d+$/.test(alias);
+		const numericWidth = alias !== null && /^\d+$/.test(alias)
+			? Number(alias)
+			: null;
+		const hasWidth = numericWidth !== null && Number.isFinite(numericWidth);
 		const token: ImageEmbedToken = {
 			type: 'obsidian-image',
 			raw: match[0],
 			target,
-			width: hasWidth ? Number(alias) : null,
+			width: hasWidth ? numericWidth : null,
 			alt: hasWidth ? null : alias,
 		};
 		return token as Tokens.Generic;
@@ -118,8 +161,13 @@ const wikiLinkExtension: TokenizerAndRendererExtension = {
 			return undefined;
 		}
 
+		const body = match[2];
+		if (!body || body.includes('[[')) {
+			return undefined;
+		}
+
 		const embed = match[1] === '!';
-		const { target: targetWithHeading, alias } = splitAlias(match[2]);
+		const { target: targetWithHeading, alias } = splitAlias(body);
 		if (embed && isImageTarget(targetWithHeading)) {
 			return undefined;
 		}
@@ -131,6 +179,9 @@ const wikiLinkExtension: TokenizerAndRendererExtension = {
 		const heading = headingSeparator === -1
 			? null
 			: nullablePart(targetWithHeading.slice(headingSeparator + 1));
+		if (!target && !heading) {
+			return undefined;
+		}
 		const token: WikiLinkToken = {
 			type: 'obsidian-wikilink',
 			raw: match[0],
