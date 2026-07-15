@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { App, PluginSettingTab, Setting, Plugin } from 'obsidian';
 import type { Destination } from './domain/publication';
 import type { ConfluencePublisherSettings } from './domain/settings';
+import { validateDestination } from './domain/validation';
 
 export { DEFAULT_SETTINGS, migrateSettings } from './domain/settings';
 export type { ConfluencePublisherSettings } from './domain/settings';
@@ -97,6 +98,17 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			row.style.borderRadius = '6px';
 			row.style.padding = '8px 12px';
 			row.style.marginBottom = '8px';
+			const validationEl = row.createDiv({ cls: 'setting-item-description' });
+			const updateValidation = (): void => {
+				const errors = validateDestination(dest).filter((error) =>
+					error === 'Space key is required.' || error === 'Parent page ID is required.',
+				);
+				validationEl.textContent = errors.join(' ');
+				validationEl.style.color = errors.length > 0
+					? 'var(--text-error)'
+					: '';
+			};
+			updateValidation();
 
 			new Setting(row)
 				.setName('Label')
@@ -118,6 +130,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 						.setValue(dest.spaceKey)
 						.onChange(async (value) => {
 							dest.spaceKey = value.trim();
+							updateValidation();
 							await this.plugin.saveData(this.plugin.settings);
 						}),
 				);
@@ -130,6 +143,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 						.setValue(dest.parentPageId)
 						.onChange(async (value) => {
 							dest.parentPageId = value.trim();
+							updateValidation();
 							await this.plugin.saveData(this.plugin.settings);
 						}),
 				);

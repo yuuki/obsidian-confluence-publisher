@@ -41,6 +41,19 @@ var import_obsidian6 = require("obsidian");
 var import_crypto = require("crypto");
 var import_obsidian = require("obsidian");
 
+// src/domain/validation.ts
+function validateDestination(destination) {
+  const errors = [];
+  if (destination.id.trim().length === 0) errors.push("Destination ID is required.");
+  if (destination.spaceKey.trim().length === 0) errors.push("Space key is required.");
+  if (destination.parentPageId.trim().length === 0) errors.push("Parent page ID is required.");
+  return errors;
+}
+function validatePublishFiles(files) {
+  if (files.length === 0) return ["Select at least one Markdown file."];
+  return files.filter((file) => file.extension.toLowerCase() !== "md").map((file) => `${file.path} is not a Markdown file.`);
+}
+
 // src/domain/settings.ts
 var DEFAULT_SETTINGS = {
   confluenceUrl: "",
@@ -156,6 +169,15 @@ var ConfluenceSettingTab = class extends import_obsidian.PluginSettingTab {
       row.style.borderRadius = "6px";
       row.style.padding = "8px 12px";
       row.style.marginBottom = "8px";
+      const validationEl = row.createDiv({ cls: "setting-item-description" });
+      const updateValidation = () => {
+        const errors = validateDestination(dest).filter(
+          (error) => error === "Space key is required." || error === "Parent page ID is required."
+        );
+        validationEl.textContent = errors.join(" ");
+        validationEl.style.color = errors.length > 0 ? "var(--text-error)" : "";
+      };
+      updateValidation();
       new import_obsidian.Setting(row).setName("Label").addText(
         (text) => text.setPlaceholder("e.g. Research Space").setValue(dest.label).onChange(async (value) => {
           dest.label = value.trim();
@@ -165,12 +187,14 @@ var ConfluenceSettingTab = class extends import_obsidian.PluginSettingTab {
       new import_obsidian.Setting(row).setName("Space key").addText(
         (text) => text.setPlaceholder("RESEARCH").setValue(dest.spaceKey).onChange(async (value) => {
           dest.spaceKey = value.trim();
+          updateValidation();
           await this.plugin.saveData(this.plugin.settings);
         })
       );
       new import_obsidian.Setting(row).setName("Parent page ID").addText(
         (text) => text.setPlaceholder("12345").setValue(dest.parentPageId).onChange(async (value) => {
           dest.parentPageId = value.trim();
+          updateValidation();
           await this.plugin.saveData(this.plugin.settings);
         })
       );
@@ -435,12 +459,13 @@ var FileSelectModal = class extends import_obsidian2.Modal {
       cls: "confluence-publish-btn mod-cta"
     });
     this.submitBtn.addEventListener("click", () => {
-      if (this.selectedFiles.size === 0) return;
+      const files = Array.from(this.selectedFiles).filter(isMarkdownFile);
+      if (files.length === 0) return;
       this.close();
-      this.onSubmit(Array.from(this.selectedFiles));
+      this.onSubmit(files);
     });
     const activeFile = this.app.workspace.getActiveFile();
-    if (activeFile) {
+    if (activeFile && isMarkdownFile(activeFile)) {
       this.selectedFiles.add(activeFile);
     }
     this.collapsedSections.add("All Notes");
@@ -589,6 +614,7 @@ var FileSelectModal = class extends import_obsidian2.Modal {
    * Render a single file row with a checkbox, file name, and path.
    */
   renderFileItem(container, file) {
+    if (!isMarkdownFile(file)) return;
     const row = container.createDiv({ cls: "confluence-file-item" });
     row.setAttribute("role", "listitem");
     const checkbox = row.createEl("input", { type: "checkbox" });
@@ -631,6 +657,9 @@ var FileSelectModal = class extends import_obsidian2.Modal {
     }
   }
 };
+function isMarkdownFile(file) {
+  return file.extension.toLowerCase() === "md";
+}
 
 // src/ui/destination-select-modal.ts
 var import_obsidian3 = require("obsidian");
@@ -643,8 +672,11 @@ var DestinationSelectModal = class extends import_obsidian3.SuggestModal {
   }
   getSuggestions(query) {
     const lower = query.toLowerCase();
-    if (!lower) return this.destinations;
-    return this.destinations.filter(
+    const valid = this.destinations.filter(
+      (destination) => validateDestination(destination).length === 0
+    );
+    if (!lower) return valid;
+    return valid.filter(
       (d) => d.label.toLowerCase().includes(lower) || d.spaceKey.toLowerCase().includes(lower)
     );
   }
@@ -663,11 +695,79 @@ var DestinationSelectModal = class extends import_obsidian3.SuggestModal {
 
 // src/ui/progress-modal.ts
 var import_obsidian4 = require("obsidian");
+
+// src/ui/progress-state.ts
+function initialProgressState() {
+  return {
+    totalPages: 0,
+    completedPages: 0,
+    succeeded: 0,
+    failed: 0,
+    done: false,
+    cancelled: false,
+    label: "Preparing..."
+  };
+}
+function createCancelHandler(onCancel) {
+  let cancelled = false;
+  return () => {
+    if (cancelled) return;
+    cancelled = true;
+    onCancel();
+  };
+}
+function reduceProgress(state, event) {
+  if (state.cancelled) return state;
+  switch (event.type) {
+    case "planned":
+      return runningState(state, { totalPages: event.total });
+    case "page-updated":
+      return runningState(state, {
+        completedPages: Math.min(state.completedPages + 1, state.totalPages)
+      });
+    case "failed":
+      if (event.phase !== "content-update") return state;
+      return runningState(state, {
+        completedPages: Math.min(state.completedPages + 1, state.totalPages)
+      });
+    case "cancelled":
+      return {
+        ...state,
+        succeeded: event.succeeded,
+        failed: event.failed,
+        done: true,
+        cancelled: true,
+        label: "Publishing cancelled."
+      };
+    case "complete":
+      return {
+        ...state,
+        completedPages: state.totalPages,
+        succeeded: event.succeeded,
+        failed: event.failed,
+        done: true,
+        label: `Done \u2014 ${event.succeeded} succeeded, ${event.failed} failed`
+      };
+    case "page-created":
+    case "attachment-created":
+    case "attachment-updated":
+      return state;
+  }
+}
+function runningState(state, changes) {
+  const next = { ...state, ...changes };
+  return {
+    ...next,
+    label: `Publishing ${next.completedPages} / ${next.totalPages} pages...`
+  };
+}
+
+// src/ui/progress-modal.ts
 var ProgressModal = class extends import_obsidian4.Modal {
-  constructor(app) {
+  constructor(app, onCancel) {
     super(app);
-    this.total = 0;
-    this.current = 0;
+    this.state = initialProgressState();
+    this.cancel = createCancelHandler(onCancel);
   }
   onOpen() {
     const { contentEl } = this;
@@ -675,7 +775,7 @@ var ProgressModal = class extends import_obsidian4.Modal {
     contentEl.addClass("confluence-progress");
     contentEl.createEl("h2", { text: "Publishing to Confluence" });
     this.statusEl = contentEl.createDiv({ cls: "confluence-progress-status" });
-    this.statusEl.textContent = "Preparing...";
+    this.statusEl.textContent = this.state.label;
     this.progressBar = contentEl.createEl("progress", {
       cls: "confluence-progress-bar"
     });
@@ -688,64 +788,63 @@ var ProgressModal = class extends import_obsidian4.Modal {
     this.logEl.style.overflowY = "auto";
     this.logEl.style.marginTop = "12px";
     this.logEl.style.fontSize = "0.85em";
-    this.closeBtn = contentEl.createEl("button", {
-      text: "Close",
+    this.actionBtn = contentEl.createEl("button", {
+      text: "Cancel",
       cls: "mod-cta"
     });
-    this.closeBtn.style.marginTop = "12px";
-    this.closeBtn.disabled = true;
-    this.closeBtn.addEventListener("click", () => this.close());
+    this.actionBtn.style.marginTop = "12px";
+    this.actionBtn.addEventListener("click", () => {
+      if (this.state.done) this.close();
+      else this.cancel();
+    });
   }
   handleEvent(event) {
+    this.appendEvent(event);
+    this.state = reduceProgress(this.state, event);
+    this.statusEl.textContent = this.state.label;
+    this.progressBar.value = progressPercent(this.state);
+    if (this.state.done) this.actionBtn.textContent = "Close";
+  }
+  appendEvent(event) {
+    var _a;
     switch (event.type) {
-      case "start":
-        this.total = event.total * 2;
-        this.current = 0;
-        this.statusEl.textContent = `Publishing 0 / ${event.total} pages...`;
-        break;
-      case "page_created":
-        this.current++;
-        this.updateProgress();
+      case "page-created":
         this.appendLog("created", event.title);
         break;
-      case "image_uploaded":
+      case "attachment-created":
+      case "attachment-updated":
         this.appendLog("image", event.filename);
         break;
-      case "page_updated":
-        this.current++;
-        this.updateProgress();
+      case "page-updated":
         this.appendLog("updated", event.title);
         break;
-      case "error":
-        this.appendLog("error", `${event.title}: ${event.error}`);
+      case "failed":
+        this.appendLog("error", `${(_a = event.title) != null ? _a : "Publish"}: ${event.error}`);
         break;
+      case "planned":
+      case "cancelled":
       case "complete":
-        this.statusEl.textContent = `Done \u2014 ${event.succeeded} succeeded, ${event.failed} failed, ${event.skipped} skipped`;
-        this.progressBar.value = 100;
-        this.closeBtn.disabled = false;
         break;
     }
-  }
-  updateProgress() {
-    if (this.total > 0) {
-      this.progressBar.value = Math.round(this.current / this.total * 100);
-    }
-    this.statusEl.textContent = `Publishing ${this.current} / ${this.total} pages...`;
   }
   appendLog(kind, message) {
     const line = this.logEl.createDiv({ cls: "confluence-log-line" });
     const icon = { created: "\u2795", updated: "\u2705", image: "\u{1F5BC}", error: "\u274C" }[kind];
     line.style.padding = "2px 0";
-    if (kind === "error") {
-      line.style.color = "var(--text-error, #e53e3e)";
-    }
+    if (kind === "error") line.style.color = "var(--text-error, #e53e3e)";
     line.textContent = `${icon} ${message}`;
     this.logEl.scrollTop = this.logEl.scrollHeight;
   }
   onClose() {
+    if (!this.state.done) this.cancel();
     this.contentEl.empty();
   }
 };
+function progressPercent(state) {
+  if (state.done) return 100;
+  if (state.totalPages === 0) return 0;
+  return Math.round(state.completedPages / state.totalPages * 100);
+}
 
 // node_modules/marked/lib/marked.esm.js
 function _getDefaults() {
@@ -4563,6 +4662,7 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.activePublish = null;
   }
   async onload() {
     await this.loadSettings();
@@ -4571,7 +4671,6 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       id: "publish-selected",
       name: "Publish selected notes to Confluence",
       callback: () => {
-        if (!this.validateSettings()) return;
         new FileSelectModal(
           this.app,
           (files) => this.selectDestinationAndPublish(files)
@@ -4583,25 +4682,17 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       name: "Publish current note to Confluence",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!file) return false;
-        if (checking) return true;
-        if (!this.validateSettings()) return true;
-        this.selectDestinationAndPublish([file]);
+        if (file === null || file.extension.toLowerCase() !== "md") return false;
+        if (!checking) this.selectDestinationAndPublish([file]);
         return true;
       }
     });
     this.addCommand({
       id: "update-published",
       name: "Update already published notes",
-      callback: async () => {
-        if (!this.validateSettings()) return;
-        const publishedFiles = this.findPublishedFiles();
-        if (publishedFiles.length === 0) {
-          new import_obsidian6.Notice("No published notes found (no confluence-page-id in frontmatter)");
-          return;
-        }
-        this.selectDestinationAndPublish(publishedFiles);
-      }
+      callback: () => this.selectDestination((destination) => {
+        void this.updatePublished(destination);
+      })
     });
   }
   async loadSettings() {
@@ -4612,104 +4703,108 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       (settings) => this.saveData(settings)
     );
   }
-  validateSettings() {
-    const s = this.settings;
-    if (!s.confluenceUrl) {
-      new import_obsidian6.Notice("Please configure Confluence URL in settings.");
-      return false;
-    }
-    if (s.destinations.length === 0) {
-      new import_obsidian6.Notice("Please add at least one destination in settings.");
-      return false;
-    }
-    if (s.authType === "pat" && !s.token) {
-      new import_obsidian6.Notice("Please set your Personal Access Token in settings.");
-      return false;
-    }
-    if (s.authType === "basic" && (!s.username || !s.password)) {
-      new import_obsidian6.Notice("Please set username and password in settings.");
-      return false;
-    }
-    return true;
-  }
   selectDestinationAndPublish(files) {
     if (files.length === 0) {
       new import_obsidian6.Notice("No files selected.");
       return;
     }
-    const dests = this.settings.destinations;
-    if (dests.length === 1) {
-      this.runPublish(files, dests[0]);
+    this.selectDestination((destination) => this.runPublish(files, destination));
+  }
+  selectDestination(onChoose) {
+    if (this.activePublish !== null) {
+      new import_obsidian6.Notice("A Confluence publish is already running.");
       return;
     }
-    new DestinationSelectModal(this.app, dests, (dest) => {
-      this.runPublish(files, dest);
-    }).open();
+    const destinations = this.settings.destinations.filter(
+      (destination) => validateDestination(destination).length === 0
+    );
+    if (destinations.length === 0) {
+      new import_obsidian6.Notice("Please configure a complete Confluence destination in settings.");
+      return;
+    }
+    if (destinations.length === 1) {
+      onChoose(destinations[0]);
+      return;
+    }
+    new DestinationSelectModal(this.app, destinations, onChoose).open();
+  }
+  async updatePublished(destination) {
+    try {
+      const notes = new ObsidianNoteRepository(this.app);
+      const files = await notes.listPublicationCandidates(destination.id);
+      if (files.length === 0) {
+        new import_obsidian6.Notice("No notes are published to this destination.");
+        return;
+      }
+      await this.runPublish(files, destination);
+    } catch (error) {
+      new import_obsidian6.Notice(`Unable to scan published notes: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   async runPublish(files, destination) {
-    const progressModal = new ProgressModal(this.app);
-    progressModal.open();
+    if (this.activePublish !== null) {
+      new import_obsidian6.Notice("A Confluence publish is already running.");
+      return;
+    }
+    const errors = [
+      ...validateDestination(destination),
+      ...validatePublishFiles(files)
+    ];
+    if (errors.length > 0) {
+      new import_obsidian6.Notice(errors.join("\n"));
+      return;
+    }
     try {
       validateConfluenceBaseUrl(this.settings.confluenceUrl);
-      const authorization = this.settings.authType === "pat" ? `Bearer ${this.settings.token}` : `Basic ${Buffer.from(`${this.settings.username}:${this.settings.password}`).toString("base64")}`;
-      const publisher = new Publisher({
-        notes: new ObsidianNoteRepository(this.app),
-        repository: new ConfluenceRepository(new NodeHttpTransport({
-          baseUrl: this.settings.confluenceUrl,
-          headers: { Authorization: authorization, Accept: "application/json" }
-        })),
-        settings: this.settings
-      });
-      let pageIndex = 0;
-      for await (const event of publisher.publish(
-        files,
-        destination,
-        new AbortController().signal
-      )) {
-        const legacyEvent = toLegacyProgressEvent(event, pageIndex);
-        if (event.type === "page-created" || event.type === "page-updated") pageIndex++;
-        if (legacyEvent !== null) progressModal.handleEvent(legacyEvent);
+    } catch (error) {
+      new import_obsidian6.Notice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const controller = new AbortController();
+    this.activePublish = controller;
+    const progressModal = new ProgressModal(this.app, () => controller.abort());
+    progressModal.open();
+    try {
+      const publisher = this.createPublisher();
+      for await (const event of publisher.publish(files, destination, controller.signal)) {
+        progressModal.handleEvent(event);
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      new import_obsidian6.Notice(`Publishing failed: ${msg}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      new import_obsidian6.Notice(`Publishing failed: ${message}`);
       progressModal.handleEvent({
-        type: "complete",
-        succeeded: 0,
-        failed: files.length,
-        skipped: 0
+        type: "failed",
+        title: null,
+        phase: "preflight",
+        error: message
       });
+      progressModal.handleEvent({ type: "complete", succeeded: 0, failed: files.length });
+    } finally {
+      this.activePublish = null;
     }
   }
-  findPublishedFiles() {
-    var _a;
-    const files = [];
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      const cache = this.app.metadataCache.getFileCache(file);
-      if ((_a = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _a["confluence-page-id"]) {
-        files.push(file);
+  createPublisher() {
+    const authorization = this.authorizationHeader();
+    const transport = new NodeHttpTransport({
+      baseUrl: this.settings.confluenceUrl,
+      headers: { Authorization: authorization, Accept: "application/json" }
+    });
+    return new Publisher({
+      notes: new ObsidianNoteRepository(this.app),
+      repository: new ConfluenceRepository(transport),
+      settings: this.settings
+    });
+  }
+  authorizationHeader() {
+    if (this.settings.authType === "pat") {
+      if (this.settings.token.length === 0) {
+        throw new Error("Please set your Personal Access Token in settings.");
       }
+      return `Bearer ${this.settings.token}`;
     }
-    return files;
+    if (this.settings.username.length === 0 || this.settings.password.length === 0) {
+      throw new Error("Please set username and password in settings.");
+    }
+    return `Basic ${Buffer.from(`${this.settings.username}:${this.settings.password}`).toString("base64")}`;
   }
 };
-function toLegacyProgressEvent(event, index) {
-  var _a;
-  switch (event.type) {
-    case "planned":
-      return { type: "start", total: event.total };
-    case "page-created":
-      return { type: "page_created", title: event.title, index };
-    case "attachment-created":
-    case "attachment-updated":
-      return { type: "image_uploaded", filename: event.filename };
-    case "page-updated":
-      return { type: "page_updated", title: event.title, index };
-    case "failed":
-      return { type: "error", title: (_a = event.title) != null ? _a : "Publish", error: event.error };
-    case "cancelled":
-      return { type: "complete", succeeded: event.succeeded, failed: event.failed, skipped: 0 };
-    case "complete":
-      return { type: "complete", succeeded: event.succeeded, failed: event.failed, skipped: 0 };
-  }
-}

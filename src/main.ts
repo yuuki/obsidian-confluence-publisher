@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { Plugin, TFile, Notice } from 'obsidian';
+import { Notice, Plugin, TFile } from 'obsidian';
 import {
 	ConfluencePublisherSettings,
 	ConfluenceDestination,
@@ -7,28 +7,27 @@ import {
 	ConfluenceSettingTab,
 } from './settings';
 import { loadMigratedSettings } from './domain/settings';
+import { validateDestination, validatePublishFiles } from './domain/validation';
 import { FileSelectModal } from './ui/file-select-modal';
 import { DestinationSelectModal } from './ui/destination-select-modal';
 import { ProgressModal } from './ui/progress-modal';
-import { Publisher, type ProgressEvent } from './publisher';
-import { ObsidianNoteRepository } from './obsidian/note-repository';
+import { Publisher } from './publisher';
+import { ObsidianNoteRepository, type NoteFileRef } from './obsidian/note-repository';
 import { ConfluenceRepository } from './confluence/repository';
 import { NodeHttpTransport, validateConfluenceBaseUrl } from './confluence/transport';
-import type { ProgressEvent as LegacyProgressEvent } from './confluence/types';
 
 export default class ConfluencePublisherPlugin extends Plugin {
 	settings: ConfluencePublisherSettings = DEFAULT_SETTINGS;
+	private activePublish: AbortController | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
-
 		this.addSettingTab(new ConfluenceSettingTab(this.app, this));
 
 		this.addCommand({
 			id: 'publish-selected',
 			name: 'Publish selected notes to Confluence',
 			callback: () => {
-				if (!this.validateSettings()) return;
 				new FileSelectModal(this.app, (files) =>
 					this.selectDestinationAndPublish(files),
 				).open();
@@ -40,10 +39,8 @@ export default class ConfluencePublisherPlugin extends Plugin {
 			name: 'Publish current note to Confluence',
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
-				if (!file) return false;
-				if (checking) return true;
-				if (!this.validateSettings()) return true;
-				this.selectDestinationAndPublish([file]);
+				if (file === null || file.extension.toLowerCase() !== 'md') return false;
+				if (!checking) this.selectDestinationAndPublish([file]);
 				return true;
 			},
 		});
@@ -51,15 +48,9 @@ export default class ConfluencePublisherPlugin extends Plugin {
 		this.addCommand({
 			id: 'update-published',
 			name: 'Update already published notes',
-			callback: async () => {
-				if (!this.validateSettings()) return;
-				const publishedFiles = this.findPublishedFiles();
-				if (publishedFiles.length === 0) {
-					new Notice('No published notes found (no confluence-page-id in frontmatter)');
-					return;
-				}
-				this.selectDestinationAndPublish(publishedFiles);
-			},
+			callback: () => this.selectDestination((destination) => {
+				void this.updatePublished(destination);
+			}),
 		});
 	}
 
@@ -72,114 +63,117 @@ export default class ConfluencePublisherPlugin extends Plugin {
 		);
 	}
 
-	private validateSettings(): boolean {
-		const s = this.settings;
-		if (!s.confluenceUrl) {
-			new Notice('Please configure Confluence URL in settings.');
-			return false;
-		}
-		if (s.destinations.length === 0) {
-			new Notice('Please add at least one destination in settings.');
-			return false;
-		}
-		if (s.authType === 'pat' && !s.token) {
-			new Notice('Please set your Personal Access Token in settings.');
-			return false;
-		}
-		if (s.authType === 'basic' && (!s.username || !s.password)) {
-			new Notice('Please set username and password in settings.');
-			return false;
-		}
-		return true;
-	}
-
 	private selectDestinationAndPublish(files: TFile[]): void {
 		if (files.length === 0) {
 			new Notice('No files selected.');
 			return;
 		}
+		this.selectDestination((destination) => this.runPublish(files, destination));
+	}
 
-		const dests = this.settings.destinations;
+	private selectDestination(onChoose: (destination: ConfluenceDestination) => void): void {
+		if (this.activePublish !== null) {
+			new Notice('A Confluence publish is already running.');
+			return;
+		}
+		const destinations = this.settings.destinations.filter((destination) =>
+			validateDestination(destination).length === 0,
+		);
+		if (destinations.length === 0) {
+			new Notice('Please configure a complete Confluence destination in settings.');
+			return;
+		}
+		if (destinations.length === 1) {
+			onChoose(destinations[0]);
+			return;
+		}
+		new DestinationSelectModal(this.app, destinations, onChoose).open();
+	}
 
-		// Skip selection modal if only one destination
-		if (dests.length === 1) {
-			this.runPublish(files, dests[0]);
+	private async updatePublished(destination: ConfluenceDestination): Promise<void> {
+		try {
+			const notes = new ObsidianNoteRepository(this.app);
+			const files = await notes.listPublicationCandidates(destination.id);
+			if (files.length === 0) {
+				new Notice('No notes are published to this destination.');
+				return;
+			}
+			await this.runPublish(files, destination);
+		} catch (error) {
+			new Notice(`Unable to scan published notes: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async runPublish(
+		files: NoteFileRef[],
+		destination: ConfluenceDestination,
+	): Promise<void> {
+		if (this.activePublish !== null) {
+			new Notice('A Confluence publish is already running.');
 			return;
 		}
 
-		new DestinationSelectModal(this.app, dests, (dest) => {
-			this.runPublish(files, dest);
-		}).open();
-	}
+		const errors = [
+			...validateDestination(destination),
+			...validatePublishFiles(files),
+		];
+		if (errors.length > 0) {
+			new Notice(errors.join('\n'));
+			return;
+		}
 
-	private async runPublish(files: TFile[], destination: ConfluenceDestination): Promise<void> {
-		const progressModal = new ProgressModal(this.app);
+		try {
+			validateConfluenceBaseUrl(this.settings.confluenceUrl);
+		} catch (error) {
+			new Notice(error instanceof Error ? error.message : String(error));
+			return;
+		}
+
+		const controller = new AbortController();
+		this.activePublish = controller;
+		const progressModal = new ProgressModal(this.app, () => controller.abort());
 		progressModal.open();
 
 		try {
-			// Validate before deriving authorization so malformed URLs cannot enter transport setup.
-			validateConfluenceBaseUrl(this.settings.confluenceUrl);
-			const authorization = this.settings.authType === 'pat'
-				? `Bearer ${this.settings.token}`
-				: `Basic ${Buffer.from(`${this.settings.username}:${this.settings.password}`).toString('base64')}`;
-			const publisher = new Publisher({
-				notes: new ObsidianNoteRepository(this.app),
-				repository: new ConfluenceRepository(new NodeHttpTransport({
-					baseUrl: this.settings.confluenceUrl,
-					headers: { Authorization: authorization, Accept: 'application/json' },
-				})),
-				settings: this.settings,
-			});
-			let pageIndex = 0;
-			for await (const event of publisher.publish(
-				files,
-				destination,
-				new AbortController().signal,
-			)) {
-				const legacyEvent = toLegacyProgressEvent(event, pageIndex);
-				if (event.type === 'page-created' || event.type === 'page-updated') pageIndex++;
-				if (legacyEvent !== null) progressModal.handleEvent(legacyEvent);
+			const publisher = this.createPublisher();
+			for await (const event of publisher.publish(files, destination, controller.signal)) {
+				progressModal.handleEvent(event);
 			}
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			new Notice(`Publishing failed: ${msg}`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			new Notice(`Publishing failed: ${message}`);
 			progressModal.handleEvent({
-				type: 'complete',
-				succeeded: 0,
-				failed: files.length,
-				skipped: 0,
+				type: 'failed', title: null, phase: 'preflight', error: message,
 			});
+			progressModal.handleEvent({ type: 'complete', succeeded: 0, failed: files.length });
+		} finally {
+			this.activePublish = null;
 		}
 	}
 
-	private findPublishedFiles(): TFile[] {
-		const files: TFile[] = [];
-		for (const file of this.app.vault.getMarkdownFiles()) {
-			const cache = this.app.metadataCache.getFileCache(file);
-			if (cache?.frontmatter?.['confluence-page-id']) {
-				files.push(file);
+	private createPublisher(): Publisher {
+		const authorization = this.authorizationHeader();
+		const transport = new NodeHttpTransport({
+			baseUrl: this.settings.confluenceUrl,
+			headers: { Authorization: authorization, Accept: 'application/json' },
+		});
+		return new Publisher({
+			notes: new ObsidianNoteRepository(this.app),
+			repository: new ConfluenceRepository(transport),
+			settings: this.settings,
+		});
+	}
+
+	private authorizationHeader(): string {
+		if (this.settings.authType === 'pat') {
+			if (this.settings.token.length === 0) {
+				throw new Error('Please set your Personal Access Token in settings.');
 			}
+			return `Bearer ${this.settings.token}`;
 		}
-		return files;
-	}
-}
-
-function toLegacyProgressEvent(event: ProgressEvent, index: number): LegacyProgressEvent | null {
-	switch (event.type) {
-		case 'planned':
-			return { type: 'start', total: event.total };
-		case 'page-created':
-			return { type: 'page_created', title: event.title, index };
-		case 'attachment-created':
-		case 'attachment-updated':
-			return { type: 'image_uploaded', filename: event.filename };
-		case 'page-updated':
-			return { type: 'page_updated', title: event.title, index };
-		case 'failed':
-			return { type: 'error', title: event.title ?? 'Publish', error: event.error };
-		case 'cancelled':
-			return { type: 'complete', succeeded: event.succeeded, failed: event.failed, skipped: 0 };
-		case 'complete':
-			return { type: 'complete', succeeded: event.succeeded, failed: event.failed, skipped: 0 };
+		if (this.settings.username.length === 0 || this.settings.password.length === 0) {
+			throw new Error('Please set username and password in settings.');
+		}
+		return `Basic ${Buffer.from(`${this.settings.username}:${this.settings.password}`).toString('base64')}`;
 	}
 }
