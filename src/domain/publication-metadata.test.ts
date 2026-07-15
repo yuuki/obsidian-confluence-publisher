@@ -21,6 +21,12 @@ describe('publication metadata', () => {
 
 		expect(readPublication(next, 'dest-1')).toEqual(record);
 		expect(readLegacyPublication(next)).toBeNull();
-		expect(original['confluence-page-id']).toBe('old');
+		expect(next).not.toHaveProperty('confluence-page-id');
+		expect(next).not.toHaveProperty('confluence-url');
+		expect(original).toEqual({
+			title: 'Example',
+			'confluence-page-id': 'old',
+			'confluence-url': 'https://example.test/old',
+		});
 	});
 });
