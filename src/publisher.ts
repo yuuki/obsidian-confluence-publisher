@@ -111,7 +111,11 @@ export class Publisher {
 				return;
 			}
 
-			const pageTitles = await this.loadPublishedPageTitles(plan.snapshot, signal);
+			const pageTitles = await this.loadPublishedPageTitles(
+				plan.snapshot,
+				new Set(plan.pages.map((page) => page.note.path)),
+				signal,
+			);
 			yield { type: 'planned', total: plan.pages.length };
 			const resolved: PreparedPage[] = [];
 			for (const planned of plan.pages) {
@@ -311,6 +315,7 @@ export class Publisher {
 
 	private async loadPublishedPageTitles(
 		destination: DestinationSnapshot,
+		selectedPaths: ReadonlySet<string>,
 		signal: AbortSignal,
 	): Promise<Map<string, string>> {
 		signal.throwIfAborted();
@@ -319,8 +324,14 @@ export class Publisher {
 			destination,
 			this.dependencies.settings.titleSource,
 		)) {
-			if (isSameDestination(published.record, destination)) {
-				pageTitles.set(published.path, published.title);
+			if (
+				selectedPaths.has(published.path)
+				|| !isSameDestination(published.record, destination)
+			) continue;
+			signal.throwIfAborted();
+			const page = await this.dependencies.repository.getPage(published.record.pageId, signal);
+			if (page !== null && isPublishedPage(published.path, published.record.pageId, page, destination)) {
+				pageTitles.set(published.path, page.title);
 			}
 		}
 		signal.throwIfAborted();
@@ -338,6 +349,20 @@ export class Publisher {
 			cleanup.dispose();
 		}
 	}
+}
+
+function isPublishedPage(
+	sourcePath: string,
+	pageId: string,
+	page: ResolvedPage,
+	destination: DestinationSnapshot,
+): boolean {
+	return page.id === pageId
+		&& page.spaceKey === destination.spaceKey
+		&& page.parentPageId === destination.parentPageId
+		&& page.ownership?.schemaVersion === 1
+		&& page.ownership.destinationId === destination.destinationId
+		&& page.ownership.sourcePath === sourcePath;
 }
 
 export function createCleanupSignal(): CleanupSignal {

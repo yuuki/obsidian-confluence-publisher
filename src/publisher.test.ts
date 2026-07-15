@@ -239,6 +239,7 @@ describe('Publisher', () => {
 
 	it('includes unselected published notes in the wikilink map', async () => {
 		const remote = fakeRepository();
+		mockPublishedPage(remote, 'third.md', 'Third page');
 		const deps = dependencies(remote, {
 			bodyByPath: { 'first.md': '[[third]]' },
 			published: [{
@@ -259,8 +260,39 @@ describe('Publisher', () => {
 		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).toContain('ri:content-title="Third page"');
 	});
 
-	it('uses the configured filename title for an unselected published note', async () => {
+	it('uses the verified remote title when an unselected published note was renamed locally', async () => {
 		const remote = fakeRepository();
+		vi.mocked(remote.getPage).mockResolvedValueOnce({
+			id: 'page-3',
+			title: 'Old remote title',
+			spaceKey: 'DOC',
+			parentPageId: 'parent-1',
+			version: 1,
+			webui: null,
+			ownership: {
+				schemaVersion: 1,
+				destinationId: 'dest-1',
+				sourcePath: 'third.md',
+			},
+		});
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[third]]' },
+			published: [{
+				path: 'third.md',
+				title: 'New local title',
+				record: publicationRecord(),
+			}],
+		});
+
+		await collect(new Publisher(deps).publish([file('first.md')], destination(), signal()));
+
+		expect(vi.mocked(remote.updatePage).mock.calls[0][2])
+			.toContain('ri:content-title="Old remote title"');
+	});
+
+	it('uses the configured title source while discovering an unselected published note', async () => {
+		const remote = fakeRepository();
+		mockPublishedPage(remote, 'note.md', 'note');
 		const deps = dependencies(remote, {
 			titleSource: 'filename',
 			bodyByPath: { 'first.md': '[[note]]' },
@@ -300,6 +332,7 @@ describe('Publisher', () => {
 
 	it('keeps an unselected publication whose complete snapshot matches', async () => {
 		const remote = fakeRepository();
+		mockPublishedPage(remote, 'third.md', 'Third page');
 		const deps = dependencies(remote, {
 			bodyByPath: { 'first.md': '[[third]]' },
 			published: [{ path: 'third.md', title: 'Third page', record: publicationRecord() }],
@@ -311,6 +344,7 @@ describe('Publisher', () => {
 
 	it('uses the normalized destination space key during second-pass conversion', async () => {
 		const remote = fakeRepository();
+		mockPublishedPage(remote, 'third.md', 'Third page');
 		const deps = dependencies(remote, {
 			bodyByPath: { 'first.md': '[[third]]' },
 			published: [{ path: 'third.md', title: 'Third page', record: publicationRecord() }],
@@ -322,6 +356,70 @@ describe('Publisher', () => {
 		const storage = vi.mocked(remote.updatePage).mock.calls[0][2];
 		expect(storage).toContain('ri:space-key="DOC"');
 		expect(storage).not.toContain('ri:space-key=" DOC "');
+	});
+
+	it.each([
+		['missing', null],
+		['wrong page id', verifiedPublishedPage('third.md', 'Third page', { id: 'other-page' })],
+		['wrong space', verifiedPublishedPage('third.md', 'Third page', { spaceKey: 'OTHER' })],
+		['wrong parent', verifiedPublishedPage('third.md', 'Third page', { parentPageId: 'other-parent' })],
+		['unowned', verifiedPublishedPage('third.md', 'Third page', { ownership: null })],
+		['wrong destination ownership', verifiedPublishedPage('third.md', 'Third page', {
+			ownership: { schemaVersion: 1, destinationId: 'other-destination', sourcePath: 'third.md' },
+		})],
+		['wrong source ownership', verifiedPublishedPage('third.md', 'Third page', {
+			ownership: { schemaVersion: 1, destinationId: 'dest-1', sourcePath: 'other.md' },
+		})],
+	] as const)('omits an unselected published link when its remote page is %s', async (_label, page) => {
+		const remote = fakeRepository();
+		vi.mocked(remote.getPage).mockResolvedValueOnce(page);
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[third]]' },
+			published: [{ path: 'third.md', title: 'Third page', record: publicationRecord() }],
+		});
+
+		await collect(new Publisher(deps).publish([file('first.md')], destination(), signal()));
+
+		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).not.toContain('<ri:page');
+	});
+
+	it('stops before all writes when remote validation of an unselected page fails', async () => {
+		const remote = fakeRepository();
+		vi.mocked(remote.getPage).mockRejectedValue(new Error('remote lookup failed'));
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[third]]' },
+			published: [{ path: 'third.md', title: 'Third page', record: publicationRecord() }],
+		});
+
+		const events = await collect(new Publisher(deps).publish(
+			[file('first.md')], destination(), signal(),
+		));
+
+		expect(remote.createPage).not.toHaveBeenCalled();
+		expect(remote.setPageOwnership).not.toHaveBeenCalled();
+		expect(remote.updatePage).not.toHaveBeenCalled();
+		expect(events).toContainEqual(expect.objectContaining({
+			type: 'failed', phase: 'preflight', error: 'remote lookup failed',
+		}));
+	});
+
+	it('uses the planned title for a selected page without validating its link-map record', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[first]]' },
+			published: [{ path: 'first.md', title: 'Stale title', record: {
+				...publicationRecord(), pageId: 'stale-page',
+			} }],
+		});
+		vi.mocked(deps.notes.resolveLink).mockReturnValue('first.md');
+
+		await collect(new Publisher(deps).publish([file('first.md')], destination(), signal()));
+
+		expect(remote.createPage).toHaveBeenCalled();
+		expect(vi.mocked(remote.createPage).mock.invocationCallOrder[0])
+			.toBeLessThan(vi.mocked(remote.getPage).mock.invocationCallOrder[0]);
+		expect(vi.mocked(remote.updatePage).mock.calls[0][2])
+			.toContain('ri:content-title="First"');
 	});
 
 	it('writes publication metadata only after a successful page update', async () => {
@@ -483,6 +581,31 @@ function publicationRecord() {
 		pageId: 'page-3',
 		pageUrl: 'https://example.test/confluence/pages/3',
 	};
+}
+
+function verifiedPublishedPage(
+	sourcePath: string,
+	title: string,
+	override: Partial<ResolvedPage> = {},
+): ResolvedPage {
+	return {
+		id: 'page-3',
+		title,
+		spaceKey: 'DOC',
+		parentPageId: 'parent-1',
+		version: 1,
+		webui: null,
+		ownership: { schemaVersion: 1, destinationId: 'dest-1', sourcePath },
+		...override,
+	};
+}
+
+function mockPublishedPage(
+	remote: PublishRepository & Record<string, ReturnType<typeof vi.fn>>,
+	sourcePath: string,
+	title: string,
+): void {
+	vi.mocked(remote.getPage).mockResolvedValueOnce(verifiedPublishedPage(sourcePath, title));
 }
 
 function fakeRepository(options: FakeOptions = {}): PublishRepository & Record<string, ReturnType<typeof vi.fn>> {

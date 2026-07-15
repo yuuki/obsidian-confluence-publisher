@@ -43,15 +43,22 @@ var import_obsidian = require("obsidian");
 
 // src/domain/validation.ts
 function validateDestination(destination) {
+  const value = isRecord(destination) ? destination : {};
   const errors = [];
-  if (destination.id.trim().length === 0) errors.push("Destination ID is required.");
-  if (destination.spaceKey.trim().length === 0) errors.push("Space key is required.");
-  if (destination.parentPageId.trim().length === 0) errors.push("Parent page ID is required.");
+  if (!isNonEmptyString(value.id)) errors.push("Destination ID is required.");
+  if (!isNonEmptyString(value.spaceKey)) errors.push("Space key is required.");
+  if (!isNonEmptyString(value.parentPageId)) errors.push("Parent page ID is required.");
   return errors;
 }
 function validatePublishFiles(files) {
   if (files.length === 0) return ["Select at least one Markdown file."];
   return files.filter((file) => file.extension.toLowerCase() !== "md").map((file) => `${file.path} is not a Markdown file.`);
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 // src/domain/settings.ts
@@ -66,14 +73,14 @@ var DEFAULT_SETTINGS = {
   titleSource: "frontmatter"
 };
 function migrateSettings(data, createId) {
-  const validSource = typeof data === "object" && data !== null && !Array.isArray(data);
+  const validSource = isRecord2(data);
   const source = validSource ? data : {};
   let changed = !validSource;
-  let destinations = Array.isArray(source.destinations) ? source.destinations.map((destination) => ({ ...destination })) : [];
+  let rawDestinations = Array.isArray(source.destinations) ? source.destinations : [];
   if (!Array.isArray(source.destinations)) changed = true;
   const hasValidatedLegacyPair = typeof source.spaceKey === "string" && typeof source.parentPageId === "string";
-  if (destinations.length === 0 && hasValidatedLegacyPair) {
-    destinations = [{
+  if (rawDestinations.length === 0 && hasValidatedLegacyPair) {
+    rawDestinations = [{
       id: createId(),
       label: source.spaceKey,
       spaceKey: source.spaceKey,
@@ -81,16 +88,38 @@ function migrateSettings(data, createId) {
     }];
     changed = true;
   }
-  destinations = destinations.map((destination) => {
-    if (typeof destination.id === "string" && destination.id.length > 0) return destination;
-    changed = true;
-    return { ...destination, id: createId() };
+  const destinations = rawDestinations.map((value) => {
+    const destination = isRecord2(value) ? value : {};
+    const id = typeof destination.id === "string" && destination.id.length > 0 ? destination.id : createId();
+    const label = typeof destination.label === "string" ? destination.label : "";
+    const spaceKey = typeof destination.spaceKey === "string" ? destination.spaceKey : "";
+    const parentPageId = typeof destination.parentPageId === "string" ? destination.parentPageId : "";
+    if (!isRecord2(value) || destination.id !== id || destination.label !== label || destination.spaceKey !== spaceKey || destination.parentPageId !== parentPageId) {
+      changed = true;
+    }
+    return { ...destination, id, label, spaceKey, parentPageId };
   });
   if (hasValidatedLegacyPair) changed = true;
+  const confluenceUrl = normalizeStringSetting(source.confluenceUrl, DEFAULT_SETTINGS.confluenceUrl);
+  const token = normalizeStringSetting(source.token, DEFAULT_SETTINGS.token);
+  const username = normalizeStringSetting(source.username, DEFAULT_SETTINGS.username);
+  const password = normalizeStringSetting(source.password, DEFAULT_SETTINGS.password);
+  const authType = source.authType === "pat" || source.authType === "basic" ? source.authType : DEFAULT_SETTINGS.authType;
+  const stripFrontmatter = typeof source.stripFrontmatter === "boolean" ? source.stripFrontmatter : DEFAULT_SETTINGS.stripFrontmatter;
+  const titleSource = source.titleSource === "frontmatter" || source.titleSource === "filename" ? source.titleSource : DEFAULT_SETTINGS.titleSource;
+  if (source.confluenceUrl !== confluenceUrl || source.authType !== authType || source.token !== token || source.username !== username || source.password !== password || source.stripFrontmatter !== stripFrontmatter || source.titleSource !== titleSource) {
+    changed = true;
+  }
   const settings = {
-    ...DEFAULT_SETTINGS,
     ...source,
-    destinations
+    confluenceUrl,
+    destinations,
+    authType,
+    token,
+    username,
+    password,
+    stripFrontmatter,
+    titleSource
   };
   if (hasValidatedLegacyPair) {
     delete settings.spaceKey;
@@ -102,6 +131,12 @@ async function loadMigratedSettings(data, createId, save) {
   const migration = migrateSettings(data, createId);
   if (migration.changed) await save(migration.settings);
   return migration.settings;
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function normalizeStringSetting(value, fallback) {
+  return typeof value === "string" ? value : fallback;
 }
 
 // src/settings.ts
@@ -3436,9 +3471,9 @@ function isSameDestination(left, right) {
 var PUBLICATIONS_KEY = "confluence-publications";
 function readPublication(frontmatter, destinationId) {
   const publications = frontmatter[PUBLICATIONS_KEY];
-  if (!isRecord(publications)) return null;
+  if (!isRecord3(publications)) return null;
   const value = publications[destinationId];
-  if (!isRecord(value)) return null;
+  if (!isRecord3(value)) return null;
   const required = ["base-url", "space-key", "parent-page-id", "page-id", "page-url"];
   if (required.some((key) => typeof value[key] !== "string" || value[key].length === 0)) return null;
   return {
@@ -3457,7 +3492,7 @@ function readLegacyPublication(frontmatter) {
   return { pageId, pageUrl: typeof pageUrl2 === "string" ? pageUrl2 : null };
 }
 function writePublication(frontmatter, record) {
-  const current = isRecord(frontmatter[PUBLICATIONS_KEY]) ? { ...frontmatter[PUBLICATIONS_KEY] } : {};
+  const current = isRecord3(frontmatter[PUBLICATIONS_KEY]) ? { ...frontmatter[PUBLICATIONS_KEY] } : {};
   current[record.destinationId] = {
     "base-url": record.baseUrl,
     "space-key": record.spaceKey,
@@ -3470,7 +3505,7 @@ function writePublication(frontmatter, record) {
   delete next["confluence-url"];
   return next;
 }
-function isRecord(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -3798,7 +3833,11 @@ var Publisher = class {
         yield completeEvent(files.length, 0);
         return;
       }
-      const pageTitles = await this.loadPublishedPageTitles(plan.snapshot, signal);
+      const pageTitles = await this.loadPublishedPageTitles(
+        plan.snapshot,
+        new Set(plan.pages.map((page) => page.note.path)),
+        signal
+      );
       yield { type: "planned", total: plan.pages.length };
       const resolved = [];
       for (const planned of plan.pages) {
@@ -3980,15 +4019,18 @@ var Publisher = class {
     }
     return failures.length > 0 ? { failures } : { candidates, filesByPath };
   }
-  async loadPublishedPageTitles(destination, signal) {
+  async loadPublishedPageTitles(destination, selectedPaths, signal) {
     signal.throwIfAborted();
     const pageTitles = /* @__PURE__ */ new Map();
     for (const published of await this.dependencies.notes.listPublished(
       destination,
       this.dependencies.settings.titleSource
     )) {
-      if (isSameDestination(published.record, destination)) {
-        pageTitles.set(published.path, published.title);
+      if (selectedPaths.has(published.path) || !isSameDestination(published.record, destination)) continue;
+      signal.throwIfAborted();
+      const page = await this.dependencies.repository.getPage(published.record.pageId, signal);
+      if (page !== null && isPublishedPage(published.path, published.record.pageId, page, destination)) {
+        pageTitles.set(published.path, page.title);
       }
     }
     signal.throwIfAborted();
@@ -4006,6 +4048,10 @@ var Publisher = class {
     }
   }
 };
+function isPublishedPage(sourcePath, pageId, page, destination) {
+  var _a;
+  return page.id === pageId && page.spaceKey === destination.spaceKey && page.parentPageId === destination.parentPageId && ((_a = page.ownership) == null ? void 0 : _a.schemaVersion) === 1 && page.ownership.destinationId === destination.destinationId && page.ownership.sourcePath === sourcePath;
+}
 function createCleanupSignal() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS);
@@ -4559,19 +4605,19 @@ function resolvePage(value, fallback) {
 function readOwnership(page) {
   const metadata = page.metadata;
   if (metadata === void 0) return null;
-  if (!isRecord2(metadata) || Array.isArray(metadata)) {
+  if (!isRecord4(metadata) || Array.isArray(metadata)) {
     throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
   }
   const properties = metadata.properties;
   if (properties === void 0) return null;
-  if (!isRecord2(properties) || Array.isArray(properties)) {
+  if (!isRecord4(properties) || Array.isArray(properties)) {
     throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
   }
   if (!Object.prototype.hasOwnProperty.call(properties, PAGE_OWNERSHIP_PROPERTY)) {
     return null;
   }
   const property = properties[PAGE_OWNERSHIP_PROPERTY];
-  const value = isRecord2(property) ? property.value : void 0;
+  const value = isRecord4(property) ? property.value : void 0;
   if (typeof value !== "object" || value === null || !("schemaVersion" in value) || value.schemaVersion !== 1 || !("destinationId" in value) || typeof value.destinationId !== "string" || value.destinationId.length === 0 || !("sourcePath" in value) || typeof value.sourcePath !== "string" || value.sourcePath.length === 0) {
     throw new Error(`Confluence page ${page.id} has invalid ownership property data.`);
   }
@@ -4586,7 +4632,7 @@ function assertUnvisited(path, visited, operation) {
   visited.add(path);
 }
 function attachmentFromUpload(response) {
-  const attachment = isRecord2(response) && "results" in response ? pageCollection(response, isAttachmentResponse, "attachment").results[0] : response;
+  const attachment = isRecord4(response) && "results" in response ? pageCollection(response, isAttachmentResponse, "attachment").results[0] : response;
   if (attachment === void 0) throw new Error("Confluence attachment upload returned no attachment.");
   if (!isAttachmentResponse(attachment)) {
     throw new Error("Confluence returned an invalid attachment response.");
@@ -4627,24 +4673,24 @@ function quoteMultipartFilename(filename) {
   return filename.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 function pageCollection(value, isItem, itemName) {
-  if (!isRecord2(value) || !Array.isArray(value.results) || !value.results.every(isItem) || typeof value.size !== "number") {
+  if (!isRecord4(value) || !Array.isArray(value.results) || !value.results.every(isItem) || typeof value.size !== "number") {
     throw new Error(`Confluence returned an invalid ${itemName} collection response.`);
   }
-  if (value._links !== void 0 && (!isRecord2(value._links) || value._links.next !== void 0 && typeof value._links.next !== "string")) {
+  if (value._links !== void 0 && (!isRecord4(value._links) || value._links.next !== void 0 && typeof value._links.next !== "string")) {
     throw new Error(`Confluence returned an invalid ${itemName} collection response.`);
   }
   return value;
 }
 function isPageResponse(value) {
-  if (!isRecord2(value) || typeof value.id !== "string" || value.id.length === 0 || typeof value.title !== "string" || !isRecord2(value.version) || typeof value.version.number !== "number" || !Number.isSafeInteger(value.version.number)) return false;
-  if (value.space !== void 0 && (!isRecord2(value.space) || typeof value.space.key !== "string")) return false;
-  if (value.ancestors !== void 0 && (!Array.isArray(value.ancestors) || !value.ancestors.every((ancestor) => isRecord2(ancestor) && typeof ancestor.id === "string"))) return false;
+  if (!isRecord4(value) || typeof value.id !== "string" || value.id.length === 0 || typeof value.title !== "string" || !isRecord4(value.version) || typeof value.version.number !== "number" || !Number.isSafeInteger(value.version.number)) return false;
+  if (value.space !== void 0 && (!isRecord4(value.space) || typeof value.space.key !== "string")) return false;
+  if (value.ancestors !== void 0 && (!Array.isArray(value.ancestors) || !value.ancestors.every((ancestor) => isRecord4(ancestor) && typeof ancestor.id === "string"))) return false;
   return true;
 }
 function isAttachmentResponse(value) {
-  return isRecord2(value) && typeof value.id === "string" && value.id.length > 0 && typeof value.title === "string";
+  return isRecord4(value) && typeof value.id === "string" && value.id.length > 0 && typeof value.title === "string";
 }
-function isRecord2(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null;
 }
 function containsBytes(haystack, needle) {

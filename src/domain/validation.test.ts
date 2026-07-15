@@ -10,6 +10,18 @@ describe('publish input validation', () => {
 		]);
 	});
 
+	it.each([
+		['null', null],
+		['number', 42],
+		['invalid fields', { id: false, label: null, spaceKey: 7, parentPageId: null }],
+	])('reports malformed destination fields without throwing for %s input', (_case, input) => {
+		expect(validateDestination(input)).toEqual([
+			'Destination ID is required.',
+			'Space key is required.',
+			'Parent page ID is required.',
+		]);
+	});
+
 	it('accepts only Markdown files', () => {
 		expect(validatePublishFiles([
 			{ path: 'note.md', extension: 'md' },
