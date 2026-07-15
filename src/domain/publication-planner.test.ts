@@ -383,6 +383,36 @@ describe('buildPublicationPlan remote resolution', () => {
 		expect(getPage).toHaveBeenCalledOnce();
 	});
 
+	it('allows any same-origin page path when the configured base URL has no context path', async () => {
+		const candidate = note({
+			legacyPublication: legacyPublication('100', 'https://example.test/pages/viewpage.action?pageId=100'),
+		});
+		const { repository, getPage, findPagesByTitle } = lookup({
+			getPage: async () => page({ id: '100', ownership: null }),
+		});
+
+		const result = await buildPublicationPlan({
+			baseUrl: 'https://example.test',
+			destination,
+			notes: [candidate],
+			repository,
+			signal: new AbortController().signal,
+		});
+
+		expect(result).toEqual({
+			ok: true,
+			snapshot: {
+				destinationId: 'dest-1',
+				baseUrl: 'https://example.test',
+				spaceKey: 'DOC',
+				parentPageId: '42',
+			},
+			pages: [{ note: candidate, pageId: '100', operation: 'update', migrateLegacy: true, claimOwnership: true }],
+		});
+		expect(getPage).toHaveBeenCalledOnce();
+		expect(findPagesByTitle).not.toHaveBeenCalled();
+	});
+
 	it('forwards the same signal to every saved-ID and title lookup', async () => {
 		const signal = new AbortController().signal;
 		const { repository, getPage, findPagesByTitle } = lookup();
