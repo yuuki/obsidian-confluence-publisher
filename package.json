@@ -5,14 +5,18 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "node esbuild.config.mjs production"
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "esbuild": "^0.21.0",
+    "esbuild": "^0.28.1",
     "obsidian": "^1.7.2",
     "typescript": "^5.5.0",
-    "marked": "^14.0.0"
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "marked": "^14.0.0"
