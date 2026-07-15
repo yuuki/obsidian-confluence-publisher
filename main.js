@@ -717,7 +717,7 @@ function createCancelHandler(onCancel) {
   };
 }
 function reduceProgress(state, event) {
-  if (state.cancelled) return state;
+  if (state.done) return state;
   switch (event.type) {
     case "planned":
       return runningState(state, { totalPages: event.total });

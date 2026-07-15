@@ -32,7 +32,7 @@ export function createCancelHandler(onCancel: () => void): () => void {
 }
 
 export function reduceProgress(state: ProgressState, event: ProgressEvent): ProgressState {
-	if (state.cancelled) return state;
+	if (state.done) return state;
 
 	switch (event.type) {
 		case 'planned':

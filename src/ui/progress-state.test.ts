@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import type { ProgressEvent } from '../publisher';
 import { createCancelHandler, initialProgressState, reduceProgress } from './progress-state';
+
+const eventsAfterCompletion: ProgressEvent[] = [
+	{ type: 'planned', total: 99 },
+	{ type: 'page-created', title: 'Late' },
+	{ type: 'attachment-created', title: 'Late', filename: 'late.png' },
+	{ type: 'attachment-updated', title: 'Late', filename: 'late.png' },
+	{ type: 'page-updated', title: 'Late' },
+	{ type: 'failed', title: 'Late', phase: 'content-update', error: 'late failure' },
+	{ type: 'cancelled', succeeded: 0, failed: 1 },
+	{ type: 'complete', succeeded: 0, failed: 1 },
+];
 
 describe('progress state', () => {
 	it('counts completed pages rather than internal phases', () => {
@@ -35,6 +47,15 @@ describe('progress state', () => {
 		expect(completed.done).toBe(true);
 		expect(completed.cancelled).toBe(true);
 		expect(completed.label).toBe('Publishing cancelled.');
+	});
+
+	it.each(eventsAfterCompletion)('keeps completion terminal after $type', (event) => {
+		const completed = reduceProgress(
+			reduceProgress(initialProgressState(), { type: 'planned', total: 2 }),
+			{ type: 'complete', succeeded: 2, failed: 0 },
+		);
+
+		expect(reduceProgress(completed, event)).toBe(completed);
 	});
 
 	it('invokes cancellation only once', () => {
