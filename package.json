@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm test && npm run build"
+    "verify:version": "node scripts/verify-version.mjs",
+    "check": "npm run typecheck && npm test && npm run verify:version && npm run build"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
