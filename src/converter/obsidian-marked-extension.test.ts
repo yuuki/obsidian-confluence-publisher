@@ -114,6 +114,45 @@ describe('Obsidian marked extension', () => {
 		expect(code.text).toContain('[[InsideCode]] ![[inside.png]]');
 	});
 
+	it('does not treat a backtick in the info string as a fence opening', () => {
+		const markdown = [
+			'> [!NOTE]',
+			'> ```bad`info',
+			'> [!WARNING]',
+		].join('\n');
+
+		const parsed = parseObsidianMarkdown(markdown);
+		const topLevelCallouts = parsed.tokens.filter(
+			(token) => token.type === 'obsidian-callout',
+		);
+
+		expect(topLevelCallouts).toHaveLength(2);
+		expect(topLevelCallouts[0].raw).toBe('> [!NOTE]\n> ```bad`info\n');
+		expect(topLevelCallouts[1].raw).toBe('> [!WARNING]');
+	});
+
+	it('does not close a callout fence with a tab after the delimiter', () => {
+		const markdown = [
+			'> [!NOTE] Code',
+			'> ```md',
+			'> [[InsideCode]] ![[inside.png]]',
+			'> ```\t',
+			'> [!WARNING]',
+			'> ```',
+			'> [[AfterCode]]',
+		].join('\n');
+
+		const parsed = parseObsidianMarkdown(markdown);
+		const walked = walkObsidianTokens(parsed.tokens);
+
+		expect(walked.callouts).toHaveLength(1);
+		expect(walked.wikilinks).toMatchObject([{ target: 'AfterCode' }]);
+		expect(walked.images).toEqual([]);
+		const code = findToken(walked.callouts[0].tokens, 'code') as Tokens.Code;
+		expect(code.raw).toContain('```\t\n[!WARNING]');
+		expect(code.text).toContain('```\t\n[!WARNING]');
+	});
+
 	it('parses fold markers, omitted titles, and an empty body at EOF', () => {
 		const markdown = [
 			'> [!TIP]+',

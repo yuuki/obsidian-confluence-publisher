@@ -16,8 +16,7 @@ const CALLOUT_START = /^>[ \t]?\[!(\w+)\]([+-])?[ \t]*(.*?)(\r?\n|$)/;
 const NEXT_CALLOUT = /^>[ \t]?\[!\w+\]/;
 
 interface MarkdownFence {
-	marker: '`' | '~';
-	length: number;
+	delimiter: string;
 }
 
 function nullablePart(value: string | undefined): string | null {
@@ -39,22 +38,19 @@ function isImageTarget(target: string): boolean {
 	return IMAGE_EXTENSION.test(target);
 }
 
+// Mirror marked's fence grammar so boundary scanning and recursive lexing agree.
 function openingFence(line: string): MarkdownFence | null {
-	const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-	if (!match) {
+	const match = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line);
+	if (!match || (match[1][0] === '`' && match[2].includes('`'))) {
 		return null;
 	}
-	return {
-		marker: match[1][0] as MarkdownFence['marker'],
-		length: match[1].length,
-	};
+	return { delimiter: match[1] };
 }
 
 function closesFence(line: string, fence: MarkdownFence): boolean {
-	const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-	return match !== null
-		&& match[1][0] === fence.marker
-		&& match[1].length >= fence.length;
+	const candidate = line.replace(/^ {0,3}/, '');
+	return candidate.startsWith(fence.delimiter)
+		&& /^[~`]* *$/.test(candidate.slice(fence.delimiter.length));
 }
 
 const calloutExtension: TokenizerAndRendererExtension = {
