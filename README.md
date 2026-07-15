@@ -1,113 +1,142 @@
 # Confluence Publisher for Obsidian
 
-Publish Obsidian notes to **Confluence Server / Data Center** with full support for images, wikilinks, and callouts.
+Publish Obsidian notes to **Confluence Server / Data Center** while preserving images, wikilinks, callouts, and task lists.
 
 ## Features
 
-- **Image upload** — `![[image.png]]` embeds are uploaded as page attachments and rendered inline
-- **Wikilink resolution** — `[[Page Name|alias]]` links between published notes become Confluence cross-page links
-- **Callout conversion** — `> [!NOTE]`, `> [!WARNING]`, etc. map to Confluence info/warning/tip/note macros
-- **Multiple destinations** — Configure several Space Key + Parent Page ID presets and choose one each time you publish
-- **Smart file selection** — The active note is pre-selected; outgoing links and backlinks are surfaced for easy batch publishing
-- **Incremental updates** — Already-published notes (tracked via `confluence-page-id` in frontmatter) are updated in place; already-uploaded images are skipped
-- **Two authentication methods** — Personal Access Token (Bearer) or Basic Auth (username/password)
+- **Safe multi-destination publishing** — Each destination has a stable identity, and every note keeps an independent publication record for each destination.
+- **Ownership-aware updates** — Published pages carry an `obsidian-confluence-publisher` content property. A manually created page with the same title is never claimed or overwritten automatically.
+- **Wikilink resolution** — Links to notes already published to the selected destination remain Confluence page links even during a single-note publish.
+- **Storage Format conversion** — Markdown is parsed as tokens before rendering headings, tables, code, callouts, task lists, wikilinks, and embeds to Confluence Storage Format.
+- **Reliable image updates** — Vault paths produce collision-resistant attachment names, and referenced attachments are created or updated on every publish.
+- **Preflight validation and recovery** — Invalid destinations, duplicate titles or page IDs, unresolved images, and ownership mismatches stop the publish before remote writes.
+- **Cancelable publishing** — A running publish can be canceled, and only the placeholder page whose ownership could not be recorded is rolled back.
+- **Two authentication methods** — Personal Access Token (Bearer) or Basic Auth (username/password).
 
 ## Requirements
 
-- Obsidian **1.0.0+** (desktop only)
+- Obsidian **1.0.0+** on desktop
 - Confluence **Server or Data Center** with REST API v1 enabled
-- A Personal Access Token or username/password with page-create and attachment-upload permissions
+- A Personal Access Token or username/password with permission to read, create, update, and delete pages, manage content properties, and upload attachments
+- An HTTPS Confluence URL; plain HTTP is accepted only for `localhost`, `127.0.0.1`, and `::1`
+
+Confluence Cloud and Obsidian mobile are not supported.
 
 ## Installation
 
-### Using BRAT (recommended for beta users)
+### Using BRAT
 
-[BRAT](https://tfthacker.com/BRAT) (Beta Reviewers Auto-update Tester) lets you install plugins directly from GitHub without manual file copying.
+[BRAT](https://tfthacker.com/BRAT) installs release builds directly from GitHub. This repository supports BRAT from `v0.1.0`; each compatible GitHub Release must contain `main.js` and `manifest.json` assets.
 
-1. Install and enable the **BRAT** plugin from Obsidian's Community plugins
-2. Open BRAT settings and click **Add Beta plugin**
-3. Enter the repository URL: `https://github.com/yuuki/obsidian-confluence-publisher`
-4. Click **Add Plugin** — BRAT will download and install it automatically
-5. Enable **Confluence Publisher** in Obsidian → Settings → Community plugins
-6. Configure your Confluence URL, credentials, and at least one destination
+1. Install and enable **BRAT** from Obsidian's Community plugins.
+2. In BRAT settings, choose **Add Beta plugin**.
+3. Enter `https://github.com/yuuki/obsidian-confluence-publisher`.
+4. Enable **Confluence Publisher** in Obsidian → Settings → Community plugins.
+5. Configure the Confluence URL, credentials, and at least one destination.
 
 ### Manual installation
 
-1. Copy the plugin folder into your vault's `.obsidian/plugins/confluence-publisher/` directory
-2. Enable **Confluence Publisher** in Obsidian → Settings → Community plugins
-3. Configure your Confluence URL, credentials, and at least one destination
+Copy `main.js` and `manifest.json` from a GitHub Release into:
+
+```text
+<vault>/.obsidian/plugins/confluence-publisher/
+```
+
+Then enable **Confluence Publisher** in Obsidian's Community plugins settings.
 
 ### Build from source
 
 ```bash
-cd .obsidian/plugins/confluence-publisher
 npm install
 npm run build
 ```
+
+Copy `main.js` and `manifest.json` into the plugin directory shown above.
 
 ## Configuration
 
 Open Obsidian → Settings → Confluence Publisher.
 
 | Setting | Description |
-|---------|-------------|
-| **Confluence URL** | Base URL of your instance (e.g. `https://confluence.example.com`). No trailing slash. |
-| **Destinations** | One or more publish targets. Each has a label, Space Key, and Parent Page ID. |
-| **Authentication type** | `Personal Access Token` or `Basic Auth`. |
-| **Strip frontmatter** | Remove YAML frontmatter from the published page (default: on). |
-| **Title source** | Use the frontmatter `title` field or the filename as the Confluence page title. |
+|---|---|
+| **Confluence URL** | Base URL of the Server/DC instance, including its context path if applicable. HTTPS is required except for loopback development URLs. |
+| **Destinations** | One or more presets containing a label, Space Key, and direct Parent Page ID. Incomplete rows remain editable but cannot be selected for publishing. |
+| **Authentication type** | Personal Access Token or Basic Auth. |
+| **Strip frontmatter** | Remove YAML frontmatter from published content (enabled by default). |
+| **Title source** | Use the frontmatter `title` value when present, or use the note filename. |
 
-### Finding your Parent Page ID
+To find a Parent Page ID, open the target parent page and locate `pageId=123456` in its URL.
 
-Open the target parent page in Confluence, then look at the URL — it contains `pageId=123456`. Use that number as the Parent Page ID.
+Changing the label of a destination keeps its identity. Changing its space or parent makes existing publication records fail validation; add a new destination when it should represent a different target.
 
 ## Usage
 
-Three commands are available from the Command Palette (`Ctrl/Cmd + P`):
+The Command Palette provides three commands:
 
 | Command | Description |
-|---------|-------------|
-| **Publish selected notes** | Opens a file picker with sections for the current note, outgoing links, backlinks, and all notes. Select files and publish. |
-| **Publish current note** | Publishes the active note directly (skips file picker). |
-| **Update already published notes** | Finds all notes with `confluence-page-id` in frontmatter and re-publishes them. |
+|---|---|
+| **Publish selected notes to Confluence** | Select Markdown notes from the current note, outgoing links, backlinks, or all notes, then choose a destination. |
+| **Publish current note to Confluence** | Publish the active Markdown note to a selected destination. The command is unavailable for non-Markdown files. |
+| **Update already published notes** | Choose a destination first, then update only notes recorded for that destination. Notes with validated legacy metadata are also migration candidates. |
 
-If you have multiple destinations configured, a destination picker appears before publishing. With a single destination, it is used automatically.
+Only one publish can run at a time. The progress dialog's **Cancel** action stops new network work and waits for the current request to finish canceling.
 
-After publishing, two frontmatter fields are added to each note:
+### Publication frontmatter
+
+After a successful page update, the note stores a destination-scoped record:
 
 ```yaml
-confluence-page-id: "123456"
-confluence-url: "https://confluence.example.com/pages/viewpage.action?pageId=123456"
+confluence-publications:
+  550e8400-e29b-41d4-a716-446655440000:
+    base-url: https://confluence.example.com
+    space-key: DOC
+    parent-page-id: "12345"
+    page-id: "67890"
+    page-url: https://confluence.example.com/pages/viewpage.action?pageId=67890
 ```
 
-## How It Works
+The key under `confluence-publications` is the destination ID managed by the plugin. The record is written only after the page content and all referenced attachments succeed.
 
-### Two-Pass Publishing
+Legacy `confluence-page-id` and `confluence-url` fields remain readable. They are migrated only after the page's base URL, space, and direct parent have been validated. A successful migration writes the destination-scoped record and removes the legacy fields.
 
-1. **Pass 1 — Page creation**: Each note gets a Confluence page (created or found by title). This builds the mapping needed to resolve wikilinks between notes.
-2. **Pass 2 — Content conversion**: Obsidian markdown is converted to Confluence Storage Format, images are uploaded as attachments, and pages are updated with the final content.
+## Safety model
 
-### Markdown Conversion
+Before creating or changing pages, the plugin validates all selected notes, titles, page IDs, images, destination snapshots, and existing page ownership. Published pages receive the `obsidian-confluence-publisher` content property containing the schema version, destination ID, and source note path. Existing pages are updated only when their location and ownership match. A human-authored page without that property, including one with the same title, is left untouched and reported as a conflict.
 
-| Obsidian syntax | Confluence result |
-|----------------|-------------------|
-| `![[image.png\|600]]` | `<ac:image>` with attachment |
-| `![[Note Name]]` | Cross-page link (`<ac:link>`) |
-| `[[Page\|alias]]` | Cross-page link with display text |
-| `> [!NOTE] title` | Info/warning/tip/note macro |
-| `# Heading` | `<h1>` – `<h6>` |
-| Code blocks | Code macro with language parameter |
+Publishing then runs in two stages:
+
+1. Resolve existing owned pages and create any required placeholder pages. A new page receives its ownership property immediately so links can be resolved safely.
+2. Render content, upload each referenced attachment, update the page, and write frontmatter. Failure on one page does not prevent other resolved pages from completing.
+
+If saving ownership on a newly created placeholder fails, the plugin attempts a one-time rollback with an independent five-second timeout, even after cancellation. If both ownership storage and rollback fail, the error reports the orphan page ID and URL for manual recovery. Owned placeholder pages left by another interruption can be recovered on the next publish by matching space, parent, title, destination ID, and source path.
+
+## Images and links
+
+Embedded vault images use deterministic attachment names based on their normalized vault path, basename, and a short SHA-256 hash. This prevents two files with the same basename in different folders from colliding. Duplicate references on one page upload once; an existing attachment with that generated name is updated on every publish so local changes are reflected. Old basename-only attachments are not deleted.
+
+Wikilinks resolve only against publication records for the selected destination. An unpublished linked note is rendered as display text. Note embeds become links to published pages rather than expanded note content. Heading fragments and aliases are preserved.
+
+## Supported Markdown
+
+| Obsidian or Markdown syntax | Confluence result |
+|---|---|
+| `![[image.png\|600]]` | Attached image with optional width |
+| `![[Note Name]]` | Link to an owned published page |
+| `[[Page#Heading\|alias]]` | Page link with anchor and display text |
+| `> [!NOTE] title` | Confluence info/warning/tip/note macro |
+| `# Heading` | `<h1>` through `<h6>` |
+| Fenced code | Code macro preserving CDATA content |
 | Tables | Confluence table markup |
-| `- [x] task` | Confluence native task (`<ac:task>`) |
-| `![alt](url)` | External image (`<ri:url>`) |
+| `- [x] task` | Confluence native task list |
+| `![alt](https://example.com/image.png)` | External image |
 
 ## Limitations
 
-- **Desktop only** — Uses Node.js `https` module for HTTP requests (not available on Obsidian mobile)
-- **Confluence Server/DC only** — Confluence Cloud uses a different API and is not supported
-- **Flat hierarchy** — All published pages are created as direct children of the configured parent page (no nested structure)
-- **No deletion** — Removing a note does not delete the corresponding Confluence page
+- All pages are direct children of the configured parent; note folders do not create a Confluence hierarchy.
+- Removing a note does not delete its Confluence page or attachments.
+- Old basename-only image attachments are retained.
+- Note embeds are links, not transclusions.
 
 ## License
 
-MIT
+[MIT](LICENSE)
