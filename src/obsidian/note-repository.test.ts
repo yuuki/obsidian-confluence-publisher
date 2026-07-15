@@ -67,3 +67,38 @@ it('replaces frontmatter metadata through the Obsidian adapter without rewriting
 		'dest-1': expect.objectContaining({ 'page-id': 'page-1' }),
 	});
 });
+
+it('selects the configured title and filters publications by the complete destination snapshot', async () => {
+	const file = { path: 'note.md', basename: 'note', extension: 'md' } as TFile;
+	const publication = {
+		'base-url': 'https://example.test/confluence',
+		'space-key': 'DOC',
+		'parent-page-id': 'parent-1',
+		'page-id': 'page-1',
+		'page-url': 'https://example.test/confluence/pages/1',
+	};
+	const raw = `---\n${JSON.stringify({
+		title: 'Different',
+		'confluence-publications': { 'dest-1': publication },
+	})}\n---\nbody`;
+	const app = {
+		vault: {
+			getMarkdownFiles: () => [file],
+			getAbstractFileByPath: () => file,
+			cachedRead: async () => raw,
+		},
+	} as unknown as App;
+	const repository = new ObsidianNoteRepository(app);
+	const snapshot = {
+		destinationId: 'dest-1',
+		baseUrl: 'https://example.test/confluence',
+		spaceKey: 'DOC',
+		parentPageId: 'parent-1',
+	};
+
+	await expect(repository.listPublished(snapshot, 'filename')).resolves.toEqual([
+		expect.objectContaining({ path: 'note.md', title: 'note' }),
+	]);
+	await expect(repository.listPublished({ ...snapshot, spaceKey: 'OTHER' }, 'frontmatter'))
+		.resolves.toEqual([]);
+});

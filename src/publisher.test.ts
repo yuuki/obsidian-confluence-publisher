@@ -24,6 +24,7 @@ interface DependencyOptions {
 	bodyByPath?: Record<string, string>;
 	legacyPaths?: string[];
 	published?: Awaited<ReturnType<NoteRepository['listPublished']>>;
+	titleSource?: 'frontmatter' | 'filename';
 }
 
 describe('Publisher', () => {
@@ -198,6 +199,56 @@ describe('Publisher', () => {
 		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).toContain('ri:content-title="Third page"');
 	});
 
+	it('uses the configured filename title for an unselected published note', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote, {
+			titleSource: 'filename',
+			bodyByPath: { 'first.md': '[[note]]' },
+			published: [{
+				path: 'note.md',
+				title: 'Different',
+				record: publicationRecord(),
+			}],
+		});
+		await collect(new Publisher(deps).publish([file('first.md')], destination(), signal()));
+
+		expect(deps.notes.listPublished).toHaveBeenCalledWith(
+			expect.objectContaining({ destinationId: 'dest-1' }),
+			'filename',
+		);
+		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).toContain('ri:content-title="note"');
+	});
+
+	it.each([
+		['base URL', { baseUrl: 'https://other.test/confluence' }],
+		['space key', { spaceKey: 'OTHER' }],
+		['parent page', { parentPageId: 'other-parent' }],
+	])('excludes an unselected publication with a mismatched %s', async (_label, override) => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[third]]' },
+			published: [{
+				path: 'third.md',
+				title: 'Third page',
+				record: { ...publicationRecord(), ...override },
+			}],
+		});
+		await collect(new Publisher(deps).publish([file('first.md')], destination(), signal()));
+
+		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).not.toContain('<ri:page');
+	});
+
+	it('keeps an unselected publication whose complete snapshot matches', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote, {
+			bodyByPath: { 'first.md': '[[third]]' },
+			published: [{ path: 'third.md', title: 'Third page', record: publicationRecord() }],
+		});
+		await collect(new Publisher(deps).publish([file('first.md')], destination(), signal()));
+
+		expect(vi.mocked(remote.updatePage).mock.calls[0][2]).toContain('ri:content-title="Third page"');
+	});
+
 	it('writes publication metadata only after a successful page update', async () => {
 		const remote = fakeRepository({ updateFailureForPage: 'page-1' });
 		const deps = dependencies(remote);
@@ -285,7 +336,7 @@ function signal(): AbortSignal {
 function dependencies(remote: PublishRepository, options: DependencyOptions = {}): {
 	notes: NoteRepository;
 	repository: PublishRepository;
-	settings: { confluenceUrl: string; stripFrontmatter: boolean; titleSource: 'frontmatter' };
+	settings: { confluenceUrl: string; stripFrontmatter: boolean; titleSource: 'frontmatter' | 'filename' };
 } {
 	const notes: NoteRepository = {
 		read: vi.fn(async (ref: NoteFileRef): Promise<NoteInput> => ({
@@ -301,9 +352,20 @@ function dependencies(remote: PublishRepository, options: DependencyOptions = {}
 			body: options.bodyByPath?.[ref.path] ?? `![[${ref.basename}.png]]`,
 		})),
 		listMarkdownFiles: vi.fn(() => []),
-		listPublished: vi.fn(async () => options.published ?? []),
+		listPublished: vi.fn(async (_destination, titleSource) =>
+			(options.published ?? []).map((entry) => ({
+				...entry,
+				title: titleSource === 'filename'
+					? entry.path.slice(entry.path.lastIndexOf('/') + 1).replace(/\.md$/i, '')
+					: entry.title,
+			})),
+		),
 		listPublicationCandidates: vi.fn(async () => []),
-		resolveLink: vi.fn((target: string) => target === 'third' ? 'third.md' : `assets/${target}`),
+		resolveLink: vi.fn((target: string) => {
+			if (target === 'third') return 'third.md';
+			if (target === 'note') return 'note.md';
+			return `assets/${target}`;
+		}),
 		readBinary: vi.fn(async () => new ArrayBuffer(1)),
 		writePublication: vi.fn(async () => undefined),
 	};
@@ -313,8 +375,19 @@ function dependencies(remote: PublishRepository, options: DependencyOptions = {}
 		settings: {
 			confluenceUrl: 'https://example.test/confluence',
 			stripFrontmatter: true,
-			titleSource: 'frontmatter',
+			titleSource: options.titleSource ?? 'frontmatter',
 		},
+	};
+}
+
+function publicationRecord() {
+	return {
+		destinationId: 'dest-1',
+		baseUrl: 'https://example.test/confluence',
+		spaceKey: 'DOC',
+		parentPageId: 'parent-1',
+		pageId: 'page-3',
+		pageUrl: 'https://example.test/confluence/pages/3',
 	};
 }
 

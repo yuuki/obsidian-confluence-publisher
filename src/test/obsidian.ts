@@ -1,5 +1,6 @@
 export function parseYaml(source: string): unknown {
 	if (source.includes('invalid: [')) throw new Error('Invalid YAML');
+	if (source.trim().startsWith('{')) return JSON.parse(source);
 	const result: Record<string, unknown> = {};
 	for (const line of source.split(/\r?\n/)) {
 		if (line.trim() === '' || /^\s/.test(line)) continue;

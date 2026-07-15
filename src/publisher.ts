@@ -1,7 +1,9 @@
 import { convertMarkdown } from './converter/storage-renderer';
 import {
 	normalizeBaseUrl,
+	isSameDestination,
 	type Destination,
+	type DestinationSnapshot,
 	type NoteCandidate,
 	type PageOwnership,
 	type PlannedPage,
@@ -16,6 +18,7 @@ import {
 import { buildPublicationPlan } from './domain/publication-planner';
 import type { ConfluencePublisherSettings } from './domain/settings';
 import {
+	resolveNoteTitle,
 	selectPublishContent,
 	type NoteFileRef,
 	type NoteRepository,
@@ -176,7 +179,7 @@ export class Publisher {
 				resolved.push({ file, planned, pageId, webui: null });
 			}
 
-			const pageTitles = await this.buildPageTitles(destination.id, resolved, signal);
+			const pageTitles = await this.buildPageTitles(plan.snapshot, resolved, signal);
 			for (const item of resolved) {
 				signal.throwIfAborted();
 				try {
@@ -271,7 +274,7 @@ export class Publisher {
 			signal.throwIfAborted();
 			try {
 				const note = await this.dependencies.notes.read(file);
-				const title = resolveTitle(note.basename, note.frontmatter, this.dependencies.settings.titleSource);
+				const title = resolveNoteTitle(note, this.dependencies.settings.titleSource);
 				const conversion = convertMarkdown(
 					selectPublishContent(note, this.dependencies.settings.stripFrontmatter),
 					{
@@ -306,14 +309,19 @@ export class Publisher {
 	}
 
 	private async buildPageTitles(
-		destinationId: string,
+		destination: DestinationSnapshot,
 		resolved: PreparedPage[],
 		signal: AbortSignal,
 	): Promise<Map<string, string>> {
 		signal.throwIfAborted();
 		const pageTitles = new Map<string, string>();
-		for (const published of await this.dependencies.notes.listPublished(destinationId)) {
-			pageTitles.set(published.path, published.title);
+		for (const published of await this.dependencies.notes.listPublished(
+			destination,
+			this.dependencies.settings.titleSource,
+		)) {
+			if (isSameDestination(published.record, destination)) {
+				pageTitles.set(published.path, published.title);
+			}
 		}
 		for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
 		return pageTitles;
@@ -362,17 +370,6 @@ function validateInput(
 		}
 	}
 	return failures;
-}
-
-function resolveTitle(
-	basename: string,
-	frontmatter: Record<string, unknown>,
-	titleSource: 'frontmatter' | 'filename',
-): string {
-	const title = frontmatter.title;
-	return titleSource === 'frontmatter' && typeof title === 'string' && title.trim()
-		? title.trim()
-		: basename;
 }
 
 function pageOwnership(destination: Destination, sourcePath: string): PageOwnership {

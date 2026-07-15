@@ -3576,6 +3576,10 @@ function parseNoteSource(path, basename, raw) {
 function selectPublishContent(note, stripFrontmatter) {
   return stripFrontmatter ? note.body : note.raw;
 }
+function resolveNoteTitle(note, titleSource) {
+  const title = note.frontmatter.title;
+  return titleSource === "frontmatter" && typeof title === "string" && title.trim() ? title.trim() : note.basename;
+}
 var ObsidianNoteRepository = class {
   constructor(app) {
     this.app = app;
@@ -3587,14 +3591,13 @@ var ObsidianNoteRepository = class {
   listMarkdownFiles() {
     return this.app.vault.getMarkdownFiles().map(toFileRef);
   }
-  async listPublished(destinationId) {
+  async listPublished(destination, titleSource) {
     const published = [];
     for (const file of this.listMarkdownFiles()) {
       const note = await this.read(file);
-      const record = readPublication(note.frontmatter, destinationId);
-      if (record !== null) {
-        const title = typeof note.frontmatter.title === "string" && note.frontmatter.title.trim() ? note.frontmatter.title.trim() : note.basename;
-        published.push({ path: note.path, title, record });
+      const record = readPublication(note.frontmatter, destination.destinationId);
+      if (record !== null && isSameDestination(record, destination)) {
+        published.push({ path: note.path, title: resolveNoteTitle(note, titleSource), record });
       }
     }
     return published;
@@ -3745,7 +3748,7 @@ var Publisher = class {
         }
         resolved.push({ file, planned, pageId, webui: null });
       }
-      const pageTitles = await this.buildPageTitles(destination.id, resolved, signal);
+      const pageTitles = await this.buildPageTitles(plan.snapshot, resolved, signal);
       for (const item of resolved) {
         signal.throwIfAborted();
         try {
@@ -3828,7 +3831,7 @@ var Publisher = class {
       signal.throwIfAborted();
       try {
         const note = await this.dependencies.notes.read(file);
-        const title = resolveTitle(note.basename, note.frontmatter, this.dependencies.settings.titleSource);
+        const title = resolveNoteTitle(note, this.dependencies.settings.titleSource);
         const conversion = convertMarkdown(
           selectPublishContent(note, this.dependencies.settings.stripFrontmatter),
           {
@@ -3861,11 +3864,16 @@ var Publisher = class {
     }
     return failures.length > 0 ? { failures } : { candidates, filesByPath };
   }
-  async buildPageTitles(destinationId, resolved, signal) {
+  async buildPageTitles(destination, resolved, signal) {
     signal.throwIfAborted();
     const pageTitles = /* @__PURE__ */ new Map();
-    for (const published of await this.dependencies.notes.listPublished(destinationId)) {
-      pageTitles.set(published.path, published.title);
+    for (const published of await this.dependencies.notes.listPublished(
+      destination,
+      this.dependencies.settings.titleSource
+    )) {
+      if (isSameDestination(published.record, destination)) {
+        pageTitles.set(published.path, published.title);
+      }
     }
     for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
     return pageTitles;
@@ -3907,10 +3915,6 @@ function validateInput(files, destination, baseUrl) {
     }
   }
   return failures;
-}
-function resolveTitle(basename, frontmatter, titleSource) {
-  const title = frontmatter.title;
-  return titleSource === "frontmatter" && typeof title === "string" && title.trim() ? title.trim() : basename;
 }
 function pageOwnership(destination, sourcePath) {
   return { schemaVersion: 1, destinationId: destination.id, sourcePath };

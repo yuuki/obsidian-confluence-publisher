@@ -4,7 +4,12 @@ import {
 	readPublication,
 	writePublication as updatePublicationFrontmatter,
 } from '../domain/publication-metadata';
-import type { NoteInput, PublicationRecord } from '../domain/publication';
+import {
+	isSameDestination,
+	type DestinationSnapshot,
+	type NoteInput,
+	type PublicationRecord,
+} from '../domain/publication';
 
 const FRONTMATTER_START_RE = /^---\r?\n/;
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)^---[ \t]*(?:\r?\n|$)/m;
@@ -18,7 +23,10 @@ export interface NoteFileRef {
 export interface NoteRepository {
 	read(file: NoteFileRef): Promise<NoteInput>;
 	listMarkdownFiles(): NoteFileRef[];
-	listPublished(destinationId: string): Promise<Array<{
+	listPublished(
+		destination: DestinationSnapshot,
+		titleSource: PublicationTitleSource,
+	): Promise<Array<{
 		path: string;
 		title: string;
 		record: PublicationRecord;
@@ -28,6 +36,8 @@ export interface NoteRepository {
 	readBinary(path: string): Promise<ArrayBuffer>;
 	writePublication(file: NoteFileRef, record: PublicationRecord): Promise<void>;
 }
+
+export type PublicationTitleSource = 'frontmatter' | 'filename';
 
 export function parseNoteSource(path: string, basename: string, raw: string): NoteInput {
 	if (FRONTMATTER_START_RE.test(raw) && !FRONTMATTER_RE.test(raw)) {
@@ -59,6 +69,13 @@ export function selectPublishContent(note: NoteInput, stripFrontmatter: boolean)
 	return stripFrontmatter ? note.body : note.raw;
 }
 
+export function resolveNoteTitle(note: Pick<NoteInput, 'basename' | 'frontmatter'>, titleSource: PublicationTitleSource): string {
+	const title = note.frontmatter.title;
+	return titleSource === 'frontmatter' && typeof title === 'string' && title.trim()
+		? title.trim()
+		: note.basename;
+}
+
 export class ObsidianNoteRepository implements NoteRepository {
 	constructor(private readonly app: App) {}
 
@@ -71,7 +88,10 @@ export class ObsidianNoteRepository implements NoteRepository {
 		return this.app.vault.getMarkdownFiles().map(toFileRef);
 	}
 
-	async listPublished(destinationId: string): Promise<Array<{
+	async listPublished(
+		destination: DestinationSnapshot,
+		titleSource: PublicationTitleSource,
+	): Promise<Array<{
 		path: string;
 		title: string;
 		record: PublicationRecord;
@@ -79,12 +99,9 @@ export class ObsidianNoteRepository implements NoteRepository {
 		const published: Array<{ path: string; title: string; record: PublicationRecord }> = [];
 		for (const file of this.listMarkdownFiles()) {
 			const note = await this.read(file);
-			const record = readPublication(note.frontmatter, destinationId);
-			if (record !== null) {
-				const title = typeof note.frontmatter.title === 'string' && note.frontmatter.title.trim()
-					? note.frontmatter.title.trim()
-					: note.basename;
-				published.push({ path: note.path, title, record });
+			const record = readPublication(note.frontmatter, destination.destinationId);
+			if (record !== null && isSameDestination(record, destination)) {
+				published.push({ path: note.path, title: resolveNoteTitle(note, titleSource), record });
 			}
 		}
 		return published;
