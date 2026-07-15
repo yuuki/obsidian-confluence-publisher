@@ -1,54 +1,11 @@
+import { randomUUID } from 'crypto';
 import { App, PluginSettingTab, Setting, Plugin } from 'obsidian';
+import type { Destination } from './domain/publication';
+import type { ConfluencePublisherSettings } from './domain/settings';
 
-export interface ConfluenceDestination {
-	label: string;
-	spaceKey: string;
-	parentPageId: string;
-}
-
-export interface ConfluencePublisherSettings {
-	confluenceUrl: string;
-	destinations: ConfluenceDestination[];
-	authType: 'pat' | 'basic';
-	token: string;
-	username: string;
-	password: string;
-	stripFrontmatter: boolean;
-	titleSource: 'frontmatter' | 'filename';
-}
-
-export const DEFAULT_SETTINGS: ConfluencePublisherSettings = {
-	confluenceUrl: '',
-	destinations: [],
-	authType: 'pat',
-	token: '',
-	username: '',
-	password: '',
-	stripFrontmatter: true,
-	titleSource: 'frontmatter',
-};
-
-/** Migrate legacy settings that had spaceKey/parentPageId at top level. */
-export function migrateSettings(data: Record<string, unknown>): ConfluencePublisherSettings {
-	const settings = Object.assign({}, DEFAULT_SETTINGS, data) as ConfluencePublisherSettings & {
-		spaceKey?: string;
-		parentPageId?: string;
-	};
-	if (!settings.destinations) {
-		settings.destinations = [];
-	}
-	// Migrate old single spaceKey/parentPageId to destinations[0]
-	if (settings.spaceKey && settings.parentPageId && settings.destinations.length === 0) {
-		settings.destinations.push({
-			label: settings.spaceKey,
-			spaceKey: settings.spaceKey,
-			parentPageId: settings.parentPageId,
-		});
-	}
-	delete settings.spaceKey;
-	delete settings.parentPageId;
-	return settings;
-}
+export { DEFAULT_SETTINGS, migrateSettings } from './domain/settings';
+export type { ConfluencePublisherSettings } from './domain/settings';
+export type ConfluenceDestination = Destination;
 
 export class ConfluenceSettingTab extends PluginSettingTab {
 	private plugin: Plugin & { settings: ConfluencePublisherSettings };
@@ -115,6 +72,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					.setCta()
 					.onClick(async () => {
 						this.plugin.settings.destinations.push({
+							id: randomUUID(),
 							label: '',
 							spaceKey: '',
 							parentPageId: '',

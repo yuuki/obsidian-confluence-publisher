@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Plugin, TFile, Notice } from 'obsidian';
 import {
 	ConfluencePublisherSettings,
@@ -60,7 +61,13 @@ export default class ConfluencePublisherPlugin extends Plugin {
 
 	private async loadSettings(): Promise<void> {
 		const data = await this.loadData();
-		this.settings = data ? migrateSettings(data) : { ...DEFAULT_SETTINGS };
+		if (!data) {
+			this.settings = structuredClone(DEFAULT_SETTINGS);
+			return;
+		}
+		const migration = migrateSettings(data, randomUUID);
+		this.settings = migration.settings;
+		if (migration.changed) await this.saveData(this.settings);
 	}
 
 	private validateSettings(): boolean {
