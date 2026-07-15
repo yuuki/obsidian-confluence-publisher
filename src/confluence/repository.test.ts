@@ -125,6 +125,25 @@ describe('ConfluenceRepository', () => {
     expect(result?.ownership).toBeNull();
   });
 
+  it.each([
+    ['getPage', (repository: ConfluenceRepository, requestSignal: AbortSignal) => repository.getPage('p', requestSignal), [
+      { id: 'p', title: 'Page', version: { number: 1 } },
+    ]],
+    ['findPagesByTitle', (repository: ConfluenceRepository, requestSignal: AbortSignal) => repository.findPagesByTitle('DOC', 'Page', requestSignal), [
+      { results: [{ id: 'p', title: 'Page', version: { number: 1 } }], size: 1, _links: {} },
+    ]],
+  ] as const)('propagates ownership property failures for %s', async (_operation, publish, responses) => {
+    const error = new TransportError('http', 'property failed', 500);
+    const transport = fakeTransport([...responses, error]);
+    const requestSignal = signal();
+
+    await expect(publish(new ConfluenceRepository(transport), requestSignal)).rejects.toBe(error);
+    expect(transport.requestJson).toHaveBeenLastCalledWith(expect.objectContaining({
+      path: '/rest/api/content/p/property/obsidian-confluence-publisher',
+      signal: requestSignal,
+    }));
+  });
+
   it('rejects a page response whose required fields are malformed', async () => {
     const transport = fakeTransport([{ id: 'p', title: 'Page', version: {} }]);
 
