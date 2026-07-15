@@ -28,14 +28,15 @@ export interface MigrationResult {
 }
 
 export function migrateSettings(
-	data: Record<string, unknown> | ConfluencePublisherSettings,
+	data: unknown,
 	createId: () => string,
 ): MigrationResult {
-	const source = data as Partial<ConfluencePublisherSettings> & {
+	const validSource = typeof data === 'object' && data !== null && !Array.isArray(data);
+	const source = (validSource ? data : {}) as Partial<ConfluencePublisherSettings> & {
 		spaceKey?: unknown;
 		parentPageId?: unknown;
 	};
-	let changed = false;
+	let changed = !validSource;
 	let destinations = Array.isArray(source.destinations)
 		? source.destinations.map((destination) => ({ ...destination }))
 		: [];
