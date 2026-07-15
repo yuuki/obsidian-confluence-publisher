@@ -6,6 +6,8 @@ export type TransportErrorCode =
   | 'timeout'
   | 'aborted'
   | 'network'
+  | 'invalid-options'
+  | 'response-too-large'
   | 'redirect'
   | 'http'
   | 'content-type'
@@ -34,9 +36,11 @@ export interface NodeHttpTransportOptions {
   baseUrl: string;
   headers: Record<string, string>;
   timeoutMs?: number;
+  maxResponseBytes?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 export function validateConfluenceBaseUrl(value: string): URL {
   let url: URL;
@@ -69,11 +73,19 @@ export class NodeHttpTransport {
   private readonly baseUrl: URL;
   private readonly headers: Record<string, string>;
   private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(options: NodeHttpTransportOptions) {
     this.baseUrl = validateConfluenceBaseUrl(options.baseUrl);
     this.headers = { ...options.headers };
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    if (!Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes <= 0) {
+      throw new TransportError(
+        'invalid-options',
+        'Confluence response byte limit must be a positive safe integer.',
+      );
+    }
   }
 
   requestJson<T>(request: JsonRequest): Promise<T> {
@@ -89,7 +101,12 @@ export class NodeHttpTransport {
       return Promise.reject(new TransportError('aborted', 'Confluence request was cancelled.'));
     }
 
-    const url = joinRequestUrl(this.baseUrl, request.path);
+    let url: URL;
+    try {
+      url = joinRequestUrl(this.baseUrl, request.path);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const transport = url.protocol === 'https:' ? nodeHttps : nodeHttp;
     const headers = { ...this.headers, ...request.headers };
     if (
@@ -138,9 +155,28 @@ export class NodeHttpTransport {
         headers,
       }, (response) => {
         const chunks: Buffer[] = [];
+        const status = response.statusCode ?? 0;
+        let receivedBytes = 0;
+
+        const failResponseTooLarge = (): void => {
+          if (settled) return;
+          fail(new TransportError(
+            'response-too-large',
+            'Confluence response exceeded the configured byte limit.',
+            status,
+          ));
+          response.destroy();
+          req.destroy();
+        };
 
         response.on('data', (chunk: Buffer | Uint8Array | string) => {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          receivedBytes += buffer.byteLength;
+          if (receivedBytes > this.maxResponseBytes) {
+            failResponseTooLarge();
+            return;
+          }
+          chunks.push(buffer);
         });
         response.once('aborted', () => {
           fail(new TransportError('network', 'Confluence response was interrupted.'));
@@ -148,13 +184,20 @@ export class NodeHttpTransport {
         response.once('error', () => {
           fail(new TransportError('network', 'Confluence response failed.'));
         });
+        const contentLength = parseContentLength(response.headers['content-length']);
+        if (contentLength !== null && contentLength > this.maxResponseBytes) {
+          failResponseTooLarge();
+          return;
+        }
         response.once('end', () => {
           if (settled) return;
-          const status = response.statusCode ?? 0;
           const body = Buffer.concat(chunks).toString('utf8');
 
           if (status >= 300 && status < 400) {
-            const location = safeRedirectLocation(response.headers.location, url);
+            const rawLocation = safeRedirectLocation(response.headers.location, url);
+            const location = rawLocation === null
+              ? null
+              : sanitizeDiagnostic(rawLocation, headers);
             fail(new TransportError(
               'redirect',
               location
@@ -167,7 +210,7 @@ export class NodeHttpTransport {
           if (status < 200 || status >= 300) {
             fail(new TransportError(
               'http',
-              `Confluence request failed (${status}): ${redactSensitiveHeaders(body, headers).slice(0, 300)}`,
+              `Confluence request failed (${status}): ${sanitizeDiagnostic(body, headers).slice(0, 300)}`,
               status,
             ));
             return;
@@ -223,11 +266,27 @@ function joinRequestUrl(baseUrl: URL, path: string): URL {
   url.pathname = `${contextPath}/${requestPath}` || '/';
   url.search = search;
   url.hash = '';
+  if (
+    contextPath !== ''
+    && url.pathname !== contextPath
+    && !url.pathname.startsWith(`${contextPath}/`)
+  ) {
+    throw new TransportError(
+      'invalid-url',
+      'Confluence request path must stay within the configured context path.',
+    );
+  }
   return url;
 }
 
 function isJsonContentType(contentType: string): boolean {
   return /^application\/(?:[A-Za-z0-9!#$&^_.+-]+\+)?json(?:\s*;|\s*$)/i.test(contentType);
+}
+
+function parseContentLength(value: string | undefined): number | null {
+  if (value === undefined || !/^\d+$/.test(value)) return null;
+  const length = Number(value);
+  return Number.isSafeInteger(length) ? length : null;
 }
 
 function hasHeader(headers: Record<string, string>, expectedName: string): boolean {
@@ -250,12 +309,70 @@ function safeRedirectLocation(location: string | undefined, requestUrl: URL): st
   }
 }
 
-function redactSensitiveHeaders(body: string, headers: Record<string, string>): string {
-  const sensitiveNames = new Set(['authorization', 'proxy-authorization', 'cookie']);
-  let redacted = body;
+function sanitizeDiagnostic(value: string, headers: Record<string, string>): string {
+  const secrets = collectCredentialSecrets(headers)
+    .flatMap(credentialVariants)
+    .filter((secret, index, values) => secret.length > 0 && values.indexOf(secret) === index)
+    .sort((left, right) => right.length - left.length);
+  return secrets.reduce(
+    (sanitized, secret) => sanitized.replace(
+      new RegExp(escapeRegExp(secret), 'gi'),
+      '[REDACTED]',
+    ),
+    value,
+  );
+}
+
+function collectCredentialSecrets(headers: Record<string, string>): string[] {
+  const secrets: string[] = [];
   for (const [name, value] of Object.entries(headers)) {
-    if (!sensitiveNames.has(name.toLowerCase()) || value.length === 0) continue;
-    redacted = redacted.split(value).join('[REDACTED]');
+    const lowerName = name.toLowerCase();
+    if (lowerName === 'cookie') {
+      secrets.push(value);
+      for (const pair of value.split(';')) {
+        const trimmed = pair.trim();
+        if (trimmed.length === 0) continue;
+        secrets.push(trimmed);
+        const equals = trimmed.indexOf('=');
+        if (equals !== -1) secrets.push(unquote(trimmed.slice(equals + 1).trim()));
+      }
+      continue;
+    }
+    if (lowerName !== 'authorization' && lowerName !== 'proxy-authorization') continue;
+
+    secrets.push(value);
+    const match = /^\s*(\S+)(?:\s+([\s\S]+))?$/.exec(value);
+    const scheme = match?.[1]?.toLowerCase();
+    const credential = match?.[2]?.trim();
+    if (!credential) continue;
+    secrets.push(credential);
+    if (scheme === 'basic') {
+      const decoded = Buffer.from(credential, 'base64').toString('utf8');
+      if (decoded.length > 0) secrets.push(decoded);
+      const colon = decoded.indexOf(':');
+      if (colon !== -1) secrets.push(decoded.slice(colon + 1));
+    }
   }
-  return redacted;
+  return secrets;
+}
+
+function credentialVariants(secret: string): string[] {
+  const variants = [secret, encodeURIComponent(secret)];
+  try {
+    const decoded = decodeURIComponent(secret);
+    if (decoded !== secret) variants.push(decoded, encodeURIComponent(decoded));
+  } catch {
+    // Invalid percent escapes are still removed through the original value.
+  }
+  return variants;
+}
+
+function unquote(value: string): string {
+  return value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+    ? value.slice(1, -1)
+    : value;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

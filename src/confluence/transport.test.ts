@@ -114,6 +114,33 @@ describe('NodeHttpTransport', () => {
     })).resolves.toEqual({ url: '/confluence/rest/api/content?limit=1' });
   });
 
+  it.each([
+    '../rest/api/content',
+    '/../rest/api/content',
+    '%2e%2e/rest/api/content',
+    '/%2E%2E/rest/api/content',
+    '.%2e/rest/api/content',
+  ])('rejects a request path that escapes the base context before networking: %s', async (path) => {
+    let contacts = 0;
+    const server = await startServer((_req, res) => {
+      contacts += 1;
+      json(res, {});
+    }, '/confluence');
+    const transport = new NodeHttpTransport({ baseUrl: server.url, headers: {} });
+
+    await expect(transport.requestJson({ method: 'GET', path }))
+      .rejects.toMatchObject({ code: 'invalid-url' });
+    expect(contacts).toBe(0);
+  });
+
+  it('keeps dot-segment requests usable when the base URL is the origin root', async () => {
+    const server = await startServer((req, res) => json(res, { url: req.url }));
+    const transport = new NodeHttpTransport({ baseUrl: server.url, headers: {} });
+
+    await expect(transport.requestJson({ method: 'GET', path: '../rest/api/content' }))
+      .resolves.toEqual({ url: '/rest/api/content' });
+  });
+
   it('connects to an IPv6 loopback base URL', async () => {
     const server = await startServer((_req, res) => json(res, { ok: true }), '', '::1');
     const transport = new NodeHttpTransport({ baseUrl: server.url, headers: {} });
@@ -160,6 +187,65 @@ describe('NodeHttpTransport', () => {
 
     await expect(transport.requestJson({ method: 'GET', path: '/hang' }))
       .rejects.toMatchObject({ code: 'timeout' });
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5])(
+    'rejects an invalid response byte limit: %s',
+    (maxResponseBytes) => {
+      expect(() => new NodeHttpTransport({
+        baseUrl: 'https://confluence.example.test',
+        headers: {},
+        maxResponseBytes,
+      })).toThrow(expect.objectContaining({ code: 'invalid-options' }));
+    },
+  );
+
+  it('rejects an oversized Content-Length before reading response data and closes the socket', async () => {
+    let socketClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { socketClosed = resolve; });
+    const server = await startServer((_req, res) => {
+      res.socket?.once('close', socketClosed);
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Content-Length': '11',
+      });
+      res.flushHeaders();
+    });
+    const transport = new NodeHttpTransport({
+      baseUrl: server.url,
+      headers: {},
+      maxResponseBytes: 10,
+      timeoutMs: 100,
+    });
+
+    await expect(transport.requestJson({ method: 'GET', path: '/content-length' }))
+      .rejects.toMatchObject({ code: 'response-too-large', status: 200 });
+    await closed;
+  });
+
+  it.each([
+    { name: 'redirect', status: 302, headers: { Location: '/login' } },
+    { name: 'non-2xx', status: 500, headers: {} },
+    { name: 'JSON', status: 200, headers: { 'Content-Type': 'application/json' } },
+  ])('limits accumulated chunk bytes for a $name response and closes the socket', async ({ status, headers }) => {
+    let socketClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { socketClosed = resolve; });
+    const server = await startServer((_req, res) => {
+      res.socket?.once('close', socketClosed);
+      res.writeHead(status, headers);
+      res.write('123456');
+      setImmediate(() => res.write('789012'));
+    });
+    const transport = new NodeHttpTransport({
+      baseUrl: server.url,
+      headers: {},
+      maxResponseBytes: 10,
+      timeoutMs: 100,
+    });
+
+    await expect(transport.requestJson({ method: 'GET', path: '/chunked' }))
+      .rejects.toMatchObject({ code: 'response-too-large', status });
+    await closed;
   });
 
   it('rejects a request whose signal is already aborted without contacting the server', async () => {
@@ -277,6 +363,83 @@ describe('NodeHttpTransport', () => {
       expect(error).toMatchObject({ code: 'http', status: 401 });
       expect((error as Error).message).toContain('[REDACTED]');
       expect((error as Error).message).not.toContain('super-secret');
+    }
+  });
+
+  it('redacts bearer, proxy, cookie, unknown-scheme, and percent-encoded credentials', async () => {
+    const secrets = [
+      'bearer/token+plus',
+      'bearer%2Ftoken%2Bplus',
+      'proxy-secret',
+      'cookie-secret',
+    ];
+    const server = await startServer((_req, res) => {
+      res.writeHead(401, { 'Content-Type': 'text/plain' });
+      res.end(`received ${secrets.join(' ')}`);
+    });
+    const transport = new NodeHttpTransport({
+      baseUrl: server.url,
+      headers: {
+        Authorization: 'Bearer bearer/token+plus',
+        'Proxy-Authorization': 'Custom proxy-secret',
+        Cookie: 'session=cookie-secret; theme=dark',
+      },
+    });
+
+    try {
+      await transport.requestJson({ method: 'GET', path: '/credential-variants' });
+      throw new Error('expected HTTP request to fail');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'http', status: 401 });
+      const message = (error as Error).message;
+      expect(message).toContain('[REDACTED]');
+      for (const secret of secrets) expect(message).not.toContain(secret);
+    }
+  });
+
+  it('redacts a decoded Basic password from diagnostics', async () => {
+    const authorization = `Basic ${Buffer.from('alice:basic-password').toString('base64')}`;
+    const server = await startServer((_req, res) => {
+      res.writeHead(401, { 'Content-Type': 'text/plain' });
+      res.end('credentials alice:basic-password basic-password basic-password%2Fencoded');
+    });
+    const transport = new NodeHttpTransport({
+      baseUrl: server.url,
+      headers: { Authorization: authorization },
+    });
+
+    try {
+      await transport.requestJson({ method: 'GET', path: '/basic-password' });
+      throw new Error('expected HTTP request to fail');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'http', status: 401 });
+      const message = (error as Error).message;
+      expect(message).toContain('[REDACTED]');
+      expect(message).not.toContain('basic-password');
+      expect(message).not.toContain('basic-password%2Fencoded');
+    }
+  });
+
+  it('redacts encoded credentials from a redirect location while retaining a safe path', async () => {
+    const server = await startServer((_req, res) => {
+      res.writeHead(302, { Location: '/login/redirect%2Fsecret' });
+      res.end();
+    });
+    const transport = new NodeHttpTransport({
+      baseUrl: server.url,
+      headers: { Authorization: 'Bearer redirect/secret' },
+    });
+
+    try {
+      await transport.requestJson({ method: 'GET', path: '/redirect-secret' });
+      throw new Error('expected redirect to fail');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'redirect', status: 302 });
+      const message = (error as Error).message;
+      expect(message).toContain('/login/');
+      expect(message).toContain('[REDACTED]');
+      expect(message).not.toContain('redirect/secret');
+      expect(message).not.toContain('redirect%2Fsecret');
     }
   });
 
