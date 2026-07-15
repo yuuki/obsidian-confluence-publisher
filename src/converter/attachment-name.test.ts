@@ -35,4 +35,13 @@ describe('attachmentNameForPath', () => {
 		expect(result).not.toMatch(/[\\/\r\n]/);
 		expect(result).toMatch(/\.svg$/);
 	});
+
+	it('sanitizes CRLF and header metacharacters from the extension', () => {
+		const result = attachmentNameForPath(
+			'folder/evil.png\r\nInjected: yes; filename="owned"',
+		);
+
+		expect(result).toMatch(/^evil-[0-9a-f]{12}\.png-injected-yes-filename-owned$/);
+		expect(result).not.toMatch(/[\r\n:;="\\/]/);
+	});
 });
