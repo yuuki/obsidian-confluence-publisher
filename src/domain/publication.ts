@@ -55,6 +55,21 @@ export interface EmbeddedImage {
   width: number | null;
 }
 
+export interface NoteCandidate extends NoteInput {
+  title: string;
+  publication: PublicationRecord | null;
+  legacyPublication: LegacyPublication | null;
+  images: Array<EmbeddedImage | { sourcePath: string; resolvedPath: null }>;
+}
+
+export interface PlannedPage {
+  note: NoteCandidate;
+  pageId: string | null;
+  operation: 'create' | 'update';
+  migrateLegacy: boolean;
+  claimOwnership: boolean;
+}
+
 export type PlanIssueCode =
   | 'invalid-file'
   | 'invalid-destination'
@@ -69,6 +84,23 @@ export interface PlanIssue {
   code: PlanIssueCode;
   path: string | null;
   message: string;
+}
+
+export type PublicationPlanResult =
+  | { ok: true; snapshot: DestinationSnapshot; pages: PlannedPage[] }
+  | { ok: false; issues: PlanIssue[] };
+
+export interface PageLookup {
+  getPage(pageId: string, signal: AbortSignal): Promise<ResolvedPage | null>;
+  findPagesByTitle(spaceKey: string, title: string, signal: AbortSignal): Promise<ResolvedPage[]>;
+}
+
+export interface PublishRepository extends PageLookup {
+  createPage(spaceKey: string, parentId: string, title: string, body: string, signal: AbortSignal): Promise<ResolvedPage>;
+  setPageOwnership(pageId: string, ownership: PageOwnership, signal: AbortSignal): Promise<void>;
+  deletePage(pageId: string, signal: AbortSignal): Promise<void>;
+  updatePage(pageId: string, title: string, body: string, currentVersion: number, signal: AbortSignal): Promise<void>;
+  putAttachment(pageId: string, filename: string, data: ArrayBuffer, mimeType: string, signal: AbortSignal): Promise<'created' | 'updated'>;
 }
 
 export function normalizeBaseUrl(value: string): string {
