@@ -5,8 +5,8 @@ import {
 	ConfluenceDestination,
 	DEFAULT_SETTINGS,
 	ConfluenceSettingTab,
-	migrateSettings,
 } from './settings';
+import { loadMigratedSettings } from './domain/settings';
 import { FileSelectModal } from './ui/file-select-modal';
 import { DestinationSelectModal } from './ui/destination-select-modal';
 import { ProgressModal } from './ui/progress-modal';
@@ -61,13 +61,11 @@ export default class ConfluencePublisherPlugin extends Plugin {
 
 	private async loadSettings(): Promise<void> {
 		const data = await this.loadData();
-		if (!data) {
-			this.settings = structuredClone(DEFAULT_SETTINGS);
-			return;
-		}
-		const migration = migrateSettings(data, randomUUID);
-		this.settings = migration.settings;
-		if (migration.changed) await this.saveData(this.settings);
+		this.settings = await loadMigratedSettings(
+			data,
+			randomUUID,
+			(settings) => this.saveData(settings),
+		);
 	}
 
 	private validateSettings(): boolean {

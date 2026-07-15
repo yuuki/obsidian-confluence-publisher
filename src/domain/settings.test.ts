@@ -1,7 +1,50 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SETTINGS, migrateSettings } from './settings';
+import { DEFAULT_SETTINGS, loadMigratedSettings, migrateSettings } from './settings';
+import type { ConfluencePublisherSettings } from './settings';
 
 describe('migrateSettings', () => {
+	it('normalizes, saves, and stably reloads falsy persisted data', async () => {
+		const saved: ConfluencePublisherSettings[] = [];
+		const save = async (settings: ConfluencePublisherSettings): Promise<void> => {
+			saved.push(settings);
+		};
+		const createId = (): string => {
+			throw new Error('must not create a destination id');
+		};
+
+		const first = await loadMigratedSettings(false, createId, save);
+
+		expect(first).toEqual(DEFAULT_SETTINGS);
+		expect(first).not.toBe(DEFAULT_SETTINGS);
+		expect(first.destinations).not.toBe(DEFAULT_SETTINGS.destinations);
+		expect(saved).toEqual([first]);
+
+		const reloaded = await loadMigratedSettings(saved[0], createId, save);
+
+		expect(reloaded).toEqual(first);
+		expect(saved).toHaveLength(1);
+	});
+
+	it.each([
+		['space key only', { spaceKey: 'DOC' }],
+		['parent page ID only', { parentPageId: '42' }],
+		['invalid parent page ID', { spaceKey: 'DOC', parentPageId: 42 }],
+	] satisfies Array<[string, Record<string, unknown>]>)
+	('preserves %s until legacy settings form a valid pair', (_case, data) => {
+		const createId = (): string => {
+			throw new Error('must not create a destination id');
+		};
+
+		const first = migrateSettings(data, createId);
+		const reloaded = migrateSettings(first.settings, createId);
+
+		expect(first.changed).toBe(true);
+		expect(first.settings).toMatchObject(data);
+		expect(first.settings.destinations).toEqual([]);
+		expect(reloaded.changed).toBe(false);
+		expect(reloaded.settings).toMatchObject(data);
+	});
+
 	it.each([
 		['string', 'corrupted'],
 		['number', 42],

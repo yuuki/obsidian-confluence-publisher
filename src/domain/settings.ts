@@ -41,16 +41,17 @@ export function migrateSettings(
 		? source.destinations.map((destination) => ({ ...destination }))
 		: [];
 	if (!Array.isArray(source.destinations)) changed = true;
+	const hasValidatedLegacyPair = typeof source.spaceKey === 'string'
+		&& typeof source.parentPageId === 'string';
 	if (
 		destinations.length === 0
-		&& typeof source.spaceKey === 'string'
-		&& typeof source.parentPageId === 'string'
+		&& hasValidatedLegacyPair
 	) {
 		destinations = [{
 			id: createId(),
-			label: source.spaceKey,
-			spaceKey: source.spaceKey,
-			parentPageId: source.parentPageId,
+			label: source.spaceKey as string,
+			spaceKey: source.spaceKey as string,
+			parentPageId: source.parentPageId as string,
 		}];
 		changed = true;
 	}
@@ -59,13 +60,25 @@ export function migrateSettings(
 		changed = true;
 		return { ...destination, id: createId() };
 	});
-	if ('spaceKey' in source || 'parentPageId' in source) changed = true;
+	if (hasValidatedLegacyPair) changed = true;
 	const settings: ConfluencePublisherSettings = {
 		...DEFAULT_SETTINGS,
 		...source,
 		destinations,
 	} as ConfluencePublisherSettings;
-	delete (settings as ConfluencePublisherSettings & { spaceKey?: unknown }).spaceKey;
-	delete (settings as ConfluencePublisherSettings & { parentPageId?: unknown }).parentPageId;
+	if (hasValidatedLegacyPair) {
+		delete (settings as ConfluencePublisherSettings & { spaceKey?: unknown }).spaceKey;
+		delete (settings as ConfluencePublisherSettings & { parentPageId?: unknown }).parentPageId;
+	}
 	return { settings, changed };
+}
+
+export async function loadMigratedSettings(
+	data: unknown,
+	createId: () => string,
+	save: (settings: ConfluencePublisherSettings) => Promise<void>,
+): Promise<ConfluencePublisherSettings> {
+	const migration = migrateSettings(data, createId);
+	if (migration.changed) await save(migration.settings);
+	return migration.settings;
 }
