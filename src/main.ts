@@ -10,7 +10,11 @@ import { loadMigratedSettings } from './domain/settings';
 import { FileSelectModal } from './ui/file-select-modal';
 import { DestinationSelectModal } from './ui/destination-select-modal';
 import { ProgressModal } from './ui/progress-modal';
-import { Publisher } from './publisher';
+import { Publisher, type ProgressEvent } from './publisher';
+import { ObsidianNoteRepository } from './obsidian/note-repository';
+import { ConfluenceRepository } from './confluence/repository';
+import { NodeHttpTransport, validateConfluenceBaseUrl } from './confluence/transport';
+import type { ProgressEvent as LegacyProgressEvent } from './confluence/types';
 
 export default class ConfluencePublisherPlugin extends Plugin {
 	settings: ConfluencePublisherSettings = DEFAULT_SETTINGS;
@@ -112,14 +116,29 @@ export default class ConfluencePublisherPlugin extends Plugin {
 		const progressModal = new ProgressModal(this.app);
 		progressModal.open();
 
-		const publisher = new Publisher(this.app, this.settings);
 		try {
+			// Validate before deriving authorization so malformed URLs cannot enter transport setup.
+			validateConfluenceBaseUrl(this.settings.confluenceUrl);
+			const authorization = this.settings.authType === 'pat'
+				? `Bearer ${this.settings.token}`
+				: `Basic ${Buffer.from(`${this.settings.username}:${this.settings.password}`).toString('base64')}`;
+			const publisher = new Publisher({
+				notes: new ObsidianNoteRepository(this.app),
+				repository: new ConfluenceRepository(new NodeHttpTransport({
+					baseUrl: this.settings.confluenceUrl,
+					headers: { Authorization: authorization, Accept: 'application/json' },
+				})),
+				settings: this.settings,
+			});
+			let pageIndex = 0;
 			for await (const event of publisher.publish(
 				files,
-				destination.spaceKey,
-				destination.parentPageId,
+				destination,
+				new AbortController().signal,
 			)) {
-				progressModal.handleEvent(event);
+				const legacyEvent = toLegacyProgressEvent(event, pageIndex);
+				if (event.type === 'page-created' || event.type === 'page-updated') pageIndex++;
+				if (legacyEvent !== null) progressModal.handleEvent(legacyEvent);
 			}
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -142,5 +161,25 @@ export default class ConfluencePublisherPlugin extends Plugin {
 			}
 		}
 		return files;
+	}
+}
+
+function toLegacyProgressEvent(event: ProgressEvent, index: number): LegacyProgressEvent | null {
+	switch (event.type) {
+		case 'planned':
+			return { type: 'start', total: event.total };
+		case 'page-created':
+			return { type: 'page_created', title: event.title, index };
+		case 'attachment-created':
+		case 'attachment-updated':
+			return { type: 'image_uploaded', filename: event.filename };
+		case 'page-updated':
+			return { type: 'page_updated', title: event.title, index };
+		case 'failed':
+			return { type: 'error', title: event.title ?? 'Publish', error: event.error };
+		case 'cancelled':
+			return { type: 'complete', succeeded: event.succeeded, failed: event.failed, skipped: 0 };
+		case 'complete':
+			return { type: 'complete', succeeded: event.succeeded, failed: event.failed, skipped: 0 };
 	}
 }

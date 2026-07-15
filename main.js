@@ -1,6 +1,8 @@
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __export = (target, all) => {
@@ -15,6 +17,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
@@ -734,272 +744,6 @@ var ProgressModal = class extends import_obsidian4.Modal {
   }
   onClose() {
     this.contentEl.empty();
-  }
-};
-
-// src/publisher.ts
-var import_obsidian5 = require("obsidian");
-
-// src/confluence/client.ts
-var nodeHttps = require("https");
-var nodeHttp = require("http");
-var ConfluenceClient = class {
-  constructor(confluenceUrl, authType, token, username, password) {
-    this.baseUrl = confluenceUrl.replace(/\/+$/, "");
-    let authValue;
-    if (authType === "pat") {
-      authValue = `Bearer ${token}`;
-    } else {
-      const bytes = new TextEncoder().encode(`${username}:${password}`);
-      const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join("");
-      authValue = `Basic ${btoa(binary)}`;
-    }
-    this.headers = {
-      "Authorization": authValue,
-      "Accept": "application/json"
-    };
-  }
-  /** Extra headers for mutating requests (POST/PUT/DELETE). */
-  get mutationHeaders() {
-    return {
-      ...this.headers,
-      "Content-Type": "application/json",
-      "X-Atlassian-Token": "nocheck"
-    };
-  }
-  // ---------------------------------------------------------------------------
-  // Public API
-  // ---------------------------------------------------------------------------
-  async findPageByTitle(spaceKey, title) {
-    const params = new URLSearchParams({
-      spaceKey,
-      title,
-      type: "page",
-      expand: "version"
-    });
-    const url = `${this.baseUrl}/rest/api/content?${params.toString()}`;
-    const response = await this.request({ url, method: "GET" });
-    const data = response.json;
-    if (data.results && data.results.length > 0) {
-      return data.results[0].id;
-    }
-    return null;
-  }
-  /**
-   * List filenames of existing attachments on a page.
-   */
-  async getAttachmentFilenames(pageId) {
-    const url = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}/child/attachment?limit=500`;
-    const response = await this.request({ url, method: "GET" });
-    const data = response.json;
-    return new Set((data.results || []).map((a) => a.title));
-  }
-  async getPage(pageId) {
-    const url = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}?expand=version,ancestors`;
-    const response = await this.request({ url, method: "GET" });
-    return response.json;
-  }
-  async createPage(spaceKey, parentId, title, body) {
-    const url = `${this.baseUrl}/rest/api/content`;
-    const payload = {
-      type: "page",
-      title,
-      space: { key: spaceKey },
-      ancestors: [{ id: parentId }],
-      body: {
-        storage: {
-          value: body,
-          representation: "storage"
-        }
-      }
-    };
-    const response = await this.request({
-      url,
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-    return response.json;
-  }
-  async updatePage(pageId, title, body, version) {
-    const url = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}`;
-    const payload = {
-      type: "page",
-      title,
-      body: {
-        storage: {
-          value: body,
-          representation: "storage"
-        }
-      },
-      version: {
-        number: version + 1
-      }
-    };
-    await this.request({
-      url,
-      method: "PUT",
-      body: JSON.stringify(payload)
-    });
-  }
-  /**
-   * Upload (or update) a file attachment on a page.
-   *
-   * Uses Node.js https directly (same as other methods) to avoid the
-   * redirect / auth-header-stripping issue with Obsidian's requestUrl.
-   */
-  async uploadAttachment(pageId, filename, data, mimeType) {
-    const boundary = `----ObsidianConfluence${Date.now()}${Math.random().toString(36).slice(2)}`;
-    const headerPart = `--${boundary}\r
-Content-Disposition: form-data; name="file"; filename="${filename}"\r
-Content-Type: ${mimeType}\r
-\r
-`;
-    const footerPart = `\r
---${boundary}--\r
-`;
-    const headerBytes = new TextEncoder().encode(headerPart);
-    const footerBytes = new TextEncoder().encode(footerPart);
-    const fileBytes = new Uint8Array(data);
-    const combined = new Uint8Array(
-      headerBytes.byteLength + fileBytes.byteLength + footerBytes.byteLength
-    );
-    combined.set(headerBytes, 0);
-    combined.set(fileBytes, headerBytes.byteLength);
-    combined.set(footerBytes, headerBytes.byteLength + fileBytes.byteLength);
-    const url = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}/child/attachment`;
-    const parsed = new URL(url);
-    const mod = parsed.protocol === "https:" ? nodeHttps : nodeHttp;
-    const reqHeaders = {
-      ...this.headers,
-      "X-Atlassian-Token": "nocheck",
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
-      "Content-Length": String(combined.byteLength)
-    };
-    console.log(`[confluence-publisher] POST ${url} (attachment: ${filename})`);
-    await new Promise((resolve, reject) => {
-      const req = mod.request(
-        {
-          hostname: parsed.hostname,
-          port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-          path: parsed.pathname + parsed.search,
-          method: "POST",
-          headers: reqHeaders
-        },
-        (res) => {
-          const chunks = [];
-          res.on("data", (chunk) => chunks.push(chunk));
-          res.on("end", () => {
-            var _a;
-            const status = (_a = res.statusCode) != null ? _a : 0;
-            console.log(`[confluence-publisher] Attachment response: ${status}`);
-            if (status >= 200 && status < 300) {
-              resolve();
-            } else {
-              const body = Buffer.concat(chunks).toString("utf-8").slice(0, 300);
-              reject(new Error(`Attachment upload failed (${status}): ${body}`));
-            }
-          });
-        }
-      );
-      req.on("error", (err) => {
-        reject(new Error(`Network error uploading attachment: ${err.message}`));
-      });
-      req.write(Buffer.from(combined.buffer, combined.byteOffset, combined.byteLength));
-      req.end();
-    });
-  }
-  async testConnection(spaceKey) {
-    const url = `${this.baseUrl}/rest/api/space/${encodeURIComponent(spaceKey)}`;
-    try {
-      await this.request({ url, method: "GET" });
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-  // ---------------------------------------------------------------------------
-  // Internal — Node.js https (no auto-redirect, matches curl behaviour)
-  // ---------------------------------------------------------------------------
-  async request(params) {
-    const isMutation = params.method !== "GET" && params.method !== "HEAD";
-    const reqHeaders = isMutation ? this.mutationHeaders : this.headers;
-    console.log(`[confluence-publisher] ${params.method} ${params.url}`);
-    const parsed = new URL(params.url);
-    const mod = parsed.protocol === "https:" ? nodeHttps : nodeHttp;
-    return new Promise((resolve, reject) => {
-      const req = mod.request(
-        {
-          hostname: parsed.hostname,
-          port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-          path: parsed.pathname + parsed.search,
-          method: params.method,
-          headers: reqHeaders
-        },
-        (res) => {
-          const chunks = [];
-          res.on("data", (chunk) => chunks.push(chunk));
-          res.on("end", () => {
-            var _a, _b, _c, _d;
-            const text = Buffer.concat(chunks).toString("utf-8");
-            const status = (_a = res.statusCode) != null ? _a : 0;
-            const ct = (_b = res.headers["content-type"]) != null ? _b : "";
-            console.log(
-              `[confluence-publisher] Response: ${status}, content-type: ${ct}`
-            );
-            const responseHeaders = {};
-            for (const [k, v] of Object.entries(res.headers)) {
-              if (typeof v === "string") responseHeaders[k] = v;
-            }
-            if (status >= 300 && status < 400) {
-              reject(
-                new Error(
-                  `Confluence returned redirect (${status}) to: ${(_c = res.headers.location) != null ? _c : "unknown"}. This usually means authentication failed or the URL needs adjustment. Check your credentials and Confluence URL.`
-                )
-              );
-              return;
-            }
-            if (status < 200 || status >= 300) {
-              let detail = text.slice(0, 200);
-              try {
-                const body = JSON.parse(text);
-                if (body.message) detail = body.message;
-                else if ((_d = body.data) == null ? void 0 : _d.message) detail = body.data.message;
-              } catch (e) {
-              }
-              reject(new Error(`Confluence API error ${status}: ${detail}`));
-              return;
-            }
-            if (text && !ct.includes("application/json")) {
-              reject(
-                new Error(
-                  `Confluence returned non-JSON response (content-type: ${ct || "unknown"}). URL: ${params.url} \u2014 Response preview: ${text.slice(0, 300)}`
-                )
-              );
-              return;
-            }
-            let json;
-            try {
-              json = text ? JSON.parse(text) : void 0;
-            } catch (e) {
-              reject(
-                new Error(
-                  `Failed to parse Confluence JSON: ${e instanceof Error ? e.message : String(e)}. Preview: ${text.slice(0, 200)}`
-                )
-              );
-              return;
-            }
-            resolve({ status, text, json, headers: responseHeaders });
-          });
-        }
-      );
-      req.on("error", (err) => {
-        reject(
-          new Error(`Network error connecting to Confluence: ${err.message}`)
-        );
-      });
-      if (params.body) req.write(params.body);
-      req.end();
-    });
   }
 };
 
@@ -3572,222 +3316,1222 @@ function convertMarkdown(markdown, context) {
   return { storage, images, issues };
 }
 
+// src/domain/publication.ts
+var PAGE_OWNERSHIP_PROPERTY = "obsidian-confluence-publisher";
+function normalizeBaseUrl(value) {
+  return value.trim().replace(/\/+$/, "");
+}
+function destinationSnapshot(baseUrl, destination) {
+  return {
+    destinationId: destination.id,
+    baseUrl: normalizeBaseUrl(baseUrl),
+    spaceKey: destination.spaceKey.trim(),
+    parentPageId: destination.parentPageId.trim()
+  };
+}
+function isSameDestination(left, right) {
+  return left.destinationId === right.destinationId && normalizeBaseUrl(left.baseUrl) === normalizeBaseUrl(right.baseUrl) && left.spaceKey === right.spaceKey && left.parentPageId === right.parentPageId;
+}
+
+// src/domain/publication-metadata.ts
+var PUBLICATIONS_KEY = "confluence-publications";
+function readPublication(frontmatter, destinationId) {
+  const publications = frontmatter[PUBLICATIONS_KEY];
+  if (!isRecord(publications)) return null;
+  const value = publications[destinationId];
+  if (!isRecord(value)) return null;
+  const required = ["base-url", "space-key", "parent-page-id", "page-id", "page-url"];
+  if (required.some((key) => typeof value[key] !== "string" || value[key].length === 0)) return null;
+  return {
+    destinationId,
+    baseUrl: value["base-url"],
+    spaceKey: value["space-key"],
+    parentPageId: value["parent-page-id"],
+    pageId: value["page-id"],
+    pageUrl: value["page-url"]
+  };
+}
+function readLegacyPublication(frontmatter) {
+  const pageId = frontmatter["confluence-page-id"];
+  if (typeof pageId !== "string" || pageId.length === 0) return null;
+  const pageUrl2 = frontmatter["confluence-url"];
+  return { pageId, pageUrl: typeof pageUrl2 === "string" ? pageUrl2 : null };
+}
+function writePublication(frontmatter, record) {
+  const current = isRecord(frontmatter[PUBLICATIONS_KEY]) ? { ...frontmatter[PUBLICATIONS_KEY] } : {};
+  current[record.destinationId] = {
+    "base-url": record.baseUrl,
+    "space-key": record.spaceKey,
+    "parent-page-id": record.parentPageId,
+    "page-id": record.pageId,
+    "page-url": record.pageUrl
+  };
+  const next = { ...frontmatter, [PUBLICATIONS_KEY]: current };
+  delete next["confluence-page-id"];
+  delete next["confluence-url"];
+  return next;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/domain/publication-planner.ts
+async function buildPublicationPlan(input) {
+  const snapshot = destinationSnapshot(input.baseUrl, input.destination);
+  const localIssues = validateLocalInput(snapshot, input.notes);
+  if (localIssues.length > 0) return { ok: false, issues: localIssues };
+  const pages = [];
+  const remoteIssues = [];
+  for (const note of input.notes) {
+    input.signal.throwIfAborted();
+    const resolution = await resolveNote(snapshot, note, input.repository, input.signal);
+    if ("issue" in resolution) remoteIssues.push(resolution.issue);
+    else pages.push(resolution.page);
+  }
+  return remoteIssues.length > 0 ? { ok: false, issues: remoteIssues } : { ok: true, snapshot, pages };
+}
+function validateLocalInput(snapshot, notes) {
+  var _a;
+  const issues = [];
+  if (snapshot.spaceKey === "" || snapshot.parentPageId === "") {
+    issues.push({
+      code: "invalid-destination",
+      path: null,
+      message: "\u516C\u958B\u5148\u306E\u30B9\u30DA\u30FC\u30B9\u30AD\u30FC\u3068\u89AA\u30DA\u30FC\u30B8ID\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+    });
+  }
+  issues.push(...collectDuplicates(notes, (note) => note.title.trim(), "duplicate-title", "\u540C\u3058\u516C\u958B\u30BF\u30A4\u30C8\u30EB"));
+  issues.push(...collectDuplicates(
+    notes,
+    (note) => {
+      var _a2, _b, _c, _d;
+      return (_d = (_c = (_a2 = note.publication) == null ? void 0 : _a2.pageId) != null ? _c : (_b = note.legacyPublication) == null ? void 0 : _b.pageId) != null ? _d : "";
+    },
+    "duplicate-page-id",
+    "\u540C\u3058Confluence\u30DA\u30FC\u30B8ID"
+  ));
+  for (const note of notes) {
+    for (const image of note.images) {
+      if (image.resolvedPath === null) {
+        issues.push({
+          code: "unresolved-image",
+          path: note.path,
+          message: `\u753B\u50CF\u300C${image.sourcePath}\u300D\u3092\u89E3\u6C7A\u3067\u304D\u307E\u305B\u3093\u3002\u30EA\u30F3\u30AF\u5148\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+        });
+      }
+    }
+    if (note.publication !== null && !isSameDestination(note.publication, snapshot)) {
+      issues.push({
+        code: "destination-mismatch",
+        path: note.path,
+        message: "\u4FDD\u5B58\u6E08\u307F\u306E\u516C\u958B\u5148\u60C5\u5831\u304C\u3001\u9078\u629E\u4E2D\u306E\u516C\u958B\u5148\u3068\u4E00\u81F4\u3057\u307E\u305B\u3093\u3002"
+      });
+    }
+    const legacyPageUrl = (_a = note.legacyPublication) == null ? void 0 : _a.pageUrl;
+    if (legacyPageUrl !== null && legacyPageUrl !== void 0 && !isUrlWithinBase(legacyPageUrl, snapshot.baseUrl)) {
+      issues.push({
+        code: "destination-mismatch",
+        path: note.path,
+        message: "\u65E7\u5F62\u5F0F\u306EConfluence URL\u304C\u3001\u9078\u629E\u4E2D\u306E\u30D9\u30FC\u30B9URL\u3068\u4E00\u81F4\u3057\u307E\u305B\u3093\u3002"
+      });
+    }
+  }
+  return issues;
+}
+function collectDuplicates(notes, valueOf, code, description) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const note of notes) {
+    const value = valueOf(note);
+    if (value === "") continue;
+    const group = groups.get(value);
+    if (group === void 0) groups.set(value, [note]);
+    else group.push(note);
+  }
+  const issues = [];
+  for (const [value, group] of groups) {
+    if (group.length < 2) continue;
+    const paths = group.map((note) => note.path).join(", ");
+    for (const note of group) {
+      issues.push({
+        code,
+        path: note.path,
+        message: `${description}\u300C${value}\u300D\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059: ${paths}`
+      });
+    }
+  }
+  return issues;
+}
+function isUrlWithinBase(pageUrl2, baseUrl) {
+  try {
+    const page = new URL(pageUrl2);
+    const base = new URL(baseUrl);
+    if (page.origin !== base.origin) return false;
+    const basePath = base.pathname.replace(/\/+$/, "");
+    return page.pathname === basePath || page.pathname.startsWith(`${basePath}/`);
+  } catch (e) {
+    return false;
+  }
+}
+async function resolveNote(snapshot, note, repository, signal) {
+  var _a, _b, _c, _d;
+  const isLegacy = note.publication === null && note.legacyPublication !== null;
+  const savedPageId = (_d = (_c = (_a = note.publication) == null ? void 0 : _a.pageId) != null ? _c : (_b = note.legacyPublication) == null ? void 0 : _b.pageId) != null ? _d : null;
+  if (savedPageId !== null) {
+    const savedPage = await repository.getPage(savedPageId, signal);
+    signal.throwIfAborted();
+    if (savedPage !== null) return resolveSavedPage(snapshot, note, savedPage, isLegacy);
+  }
+  signal.throwIfAborted();
+  const candidates = await repository.findPagesByTitle(snapshot.spaceKey, note.title, signal);
+  signal.throwIfAborted();
+  if (candidates.length === 0) {
+    return {
+      page: {
+        note,
+        pageId: null,
+        operation: "create",
+        migrateLegacy: isLegacy,
+        claimOwnership: false
+      }
+    };
+  }
+  const candidate = candidates[0];
+  if (candidates.length !== 1 || !isExactOwnedPage(candidate, snapshot, note.path)) {
+    return {
+      issue: {
+        code: "ambiguous-page",
+        path: note.path,
+        message: `\u30BF\u30A4\u30C8\u30EB\u300C${note.title}\u300D\u306E\u65E2\u5B58\u30DA\u30FC\u30B8\u3092\u5B89\u5168\u306B\u4E00\u610F\u7279\u5B9A\u3067\u304D\u307E\u305B\u3093\u3002\u516C\u958B\u5148\u3068\u6240\u6709\u60C5\u5831\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+      }
+    };
+  }
+  return {
+    page: {
+      note,
+      pageId: candidate.id,
+      operation: "update",
+      migrateLegacy: isLegacy,
+      claimOwnership: false
+    }
+  };
+}
+function resolveSavedPage(snapshot, note, page, isLegacy) {
+  const exactLocation = page.spaceKey === snapshot.spaceKey && page.parentPageId === snapshot.parentPageId;
+  const exactOwnership = isExpectedOwnership(page.ownership, snapshot.destinationId, note.path);
+  const acceptableLegacyOwnership = isLegacy && page.ownership === null;
+  if (!exactLocation || !exactOwnership && !acceptableLegacyOwnership) {
+    return {
+      issue: {
+        code: "destination-mismatch",
+        path: note.path,
+        message: `\u4FDD\u5B58\u6E08\u307F\u30DA\u30FC\u30B8ID\u300C${page.id}\u300D\u306E\u516C\u958B\u5148\u307E\u305F\u306F\u6240\u6709\u60C5\u5831\u304C\u4E00\u81F4\u3057\u307E\u305B\u3093\u3002`
+      }
+    };
+  }
+  return {
+    page: {
+      note,
+      pageId: page.id,
+      operation: "update",
+      migrateLegacy: isLegacy,
+      claimOwnership: acceptableLegacyOwnership
+    }
+  };
+}
+function isExactOwnedPage(page, snapshot, sourcePath) {
+  return page.spaceKey === snapshot.spaceKey && page.parentPageId === snapshot.parentPageId && isExpectedOwnership(page.ownership, snapshot.destinationId, sourcePath);
+}
+function isExpectedOwnership(ownership, destinationId, sourcePath) {
+  return (ownership == null ? void 0 : ownership.schemaVersion) === 1 && ownership.destinationId === destinationId && ownership.sourcePath === sourcePath;
+}
+
+// src/obsidian/note-repository.ts
+var import_obsidian5 = require("obsidian");
+var FRONTMATTER_START_RE = /^---\r?\n/;
+var FRONTMATTER_RE = /^---\r?\n([\s\S]*?)^---[ \t]*(?:\r?\n|$)/m;
+function parseNoteSource(path, basename, raw) {
+  if (FRONTMATTER_START_RE.test(raw) && !FRONTMATTER_RE.test(raw)) {
+    throw new Error(`Invalid YAML frontmatter in ${path}.`);
+  }
+  const match = FRONTMATTER_RE.exec(raw);
+  if (match === null) return { path, basename, raw, frontmatter: {}, body: raw };
+  let parsed;
+  try {
+    parsed = (0, import_obsidian5.parseYaml)(match[1]);
+  } catch (error) {
+    const detail = error instanceof Error ? ` ${error.message}` : "";
+    throw new Error(`Invalid YAML frontmatter in ${path}.${detail}`);
+  }
+  if (parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) {
+    throw new Error(`YAML frontmatter in ${path} must be an object.`);
+  }
+  return {
+    path,
+    basename,
+    raw,
+    frontmatter: parsed != null ? parsed : {},
+    body: raw.slice(match[0].length)
+  };
+}
+function selectPublishContent(note, stripFrontmatter) {
+  return stripFrontmatter ? note.body : note.raw;
+}
+var ObsidianNoteRepository = class {
+  constructor(app) {
+    this.app = app;
+  }
+  async read(file) {
+    const obsidianFile = this.getFile(file.path);
+    return parseNoteSource(file.path, file.basename, await this.app.vault.cachedRead(obsidianFile));
+  }
+  listMarkdownFiles() {
+    return this.app.vault.getMarkdownFiles().map(toFileRef);
+  }
+  async listPublished(destinationId) {
+    const published = [];
+    for (const file of this.listMarkdownFiles()) {
+      const note = await this.read(file);
+      const record = readPublication(note.frontmatter, destinationId);
+      if (record !== null) {
+        const title = typeof note.frontmatter.title === "string" && note.frontmatter.title.trim() ? note.frontmatter.title.trim() : note.basename;
+        published.push({ path: note.path, title, record });
+      }
+    }
+    return published;
+  }
+  async listPublicationCandidates(destinationId) {
+    const candidates = [];
+    for (const file of this.listMarkdownFiles()) {
+      const note = await this.read(file);
+      if (readPublication(note.frontmatter, destinationId) !== null || readLegacyPublication(note.frontmatter) !== null) candidates.push(file);
+    }
+    return candidates;
+  }
+  resolveLink(target, sourcePath) {
+    var _a, _b;
+    return (_b = (_a = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)) == null ? void 0 : _a.path) != null ? _b : null;
+  }
+  async readBinary(path) {
+    return this.app.vault.readBinary(this.getFile(path));
+  }
+  async writePublication(file, record) {
+    const obsidianFile = this.getFile(file.path);
+    await this.app.fileManager.processFrontMatter(obsidianFile, (frontmatter) => {
+      const next = writePublication(frontmatter, record);
+      for (const key of Object.keys(frontmatter)) delete frontmatter[key];
+      Object.assign(frontmatter, next);
+    });
+  }
+  getFile(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file === null || !("extension" in file)) {
+      throw new Error(`Vault file not found: ${path}`);
+    }
+    return file;
+  }
+};
+function toFileRef(file) {
+  return { path: file.path, basename: file.basename, extension: file.extension };
+}
+
 // src/publisher.ts
-var FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
-function getMimeType(ext) {
-  const map = {
+var PLACEHOLDER_BODY = "<p>Importing from Obsidian...</p>";
+var CLEANUP_TIMEOUT_MS = 5e3;
+var Publisher = class {
+  constructor(dependencies) {
+    this.dependencies = dependencies;
+  }
+  async *publish(files, destination, signal) {
+    var _a;
+    let succeeded = 0;
+    let failed = 0;
+    try {
+      signal.throwIfAborted();
+      const inputErrors = validateInput(files, destination, this.dependencies.settings.confluenceUrl);
+      if (inputErrors.length > 0) {
+        for (const error of inputErrors) {
+          yield { type: "failed", title: error.title, phase: "preflight", error: error.message };
+        }
+        yield { type: "complete", succeeded: 0, failed: inputErrors.length };
+        return;
+      }
+      const prepared = await this.prepareCandidates(files, destination, signal);
+      if ("failures" in prepared) {
+        for (const failure of prepared.failures) yield failure;
+        yield { type: "complete", succeeded: 0, failed: prepared.failures.length };
+        return;
+      }
+      const plan = await buildPublicationPlan({
+        baseUrl: this.dependencies.settings.confluenceUrl,
+        destination,
+        notes: prepared.candidates,
+        repository: this.dependencies.repository,
+        signal
+      });
+      if (!plan.ok) {
+        for (const issue of plan.issues) {
+          yield {
+            type: "failed",
+            title: issue.path,
+            phase: "preflight",
+            error: issue.message
+          };
+        }
+        yield { type: "complete", succeeded: 0, failed: plan.issues.length };
+        return;
+      }
+      yield { type: "planned", total: plan.pages.length };
+      const resolved = [];
+      for (const planned of plan.pages) {
+        signal.throwIfAborted();
+        const file = prepared.filesByPath.get(planned.note.path);
+        if (file === void 0) throw new Error(`Prepared note is missing: ${planned.note.path}`);
+        const ownership = pageOwnership(destination, planned.note.path);
+        if (planned.operation === "create") {
+          let page;
+          try {
+            page = await this.dependencies.repository.createPage(
+              plan.snapshot.spaceKey,
+              plan.snapshot.parentPageId,
+              planned.note.title,
+              PLACEHOLDER_BODY,
+              signal
+            );
+          } catch (error) {
+            if (isAbort(error, signal)) throw error;
+            failed++;
+            yield resolutionFailure(planned.note.title, error);
+            yield { type: "complete", succeeded, failed };
+            return;
+          }
+          try {
+            signal.throwIfAborted();
+            await this.dependencies.repository.setPageOwnership(page.id, ownership, signal);
+          } catch (ownershipError) {
+            const cleanupError = await this.rollbackCreatedPage(page.id);
+            if (cleanupError !== null) {
+              failed++;
+              yield {
+                type: "failed",
+                title: planned.note.title,
+                phase: "page-resolution",
+                error: orphanedPageError(page, ownershipError, cleanupError, plan.snapshot.baseUrl)
+              };
+            }
+            if (isAbort(ownershipError, signal)) throw ownershipError;
+            if (cleanupError === null) {
+              failed++;
+              yield resolutionFailure(planned.note.title, ownershipError);
+            }
+            yield { type: "complete", succeeded, failed };
+            return;
+          }
+          yield { type: "page-created", title: planned.note.title };
+          resolved.push({ file, planned, pageId: page.id, webui: page.webui });
+          continue;
+        }
+        const pageId = planned.pageId;
+        if (planned.claimOwnership) {
+          try {
+            signal.throwIfAborted();
+            await this.dependencies.repository.setPageOwnership(pageId, ownership, signal);
+          } catch (error) {
+            if (isAbort(error, signal)) throw error;
+            failed++;
+            yield resolutionFailure(planned.note.title, error);
+            yield { type: "complete", succeeded, failed };
+            return;
+          }
+        }
+        resolved.push({ file, planned, pageId, webui: null });
+      }
+      const pageTitles = await this.buildPageTitles(destination.id, resolved, signal);
+      for (const item of resolved) {
+        signal.throwIfAborted();
+        try {
+          const conversion = convertMarkdown(
+            selectPublishContent(item.planned.note, this.dependencies.settings.stripFrontmatter),
+            {
+              sourcePath: item.planned.note.path,
+              spaceKey: destination.spaceKey,
+              pageTitles,
+              resolveLink: (target, sourcePath) => this.dependencies.notes.resolveLink(target, sourcePath)
+            }
+          );
+          if (conversion.issues.length > 0) {
+            throw new Error(`Unresolved image attachments: ${conversion.issues.map((issue) => issue.target).join(", ")}`);
+          }
+          const images = new Map(conversion.images.map((image) => [image.attachmentName, image]));
+          for (const image of images.values()) {
+            signal.throwIfAborted();
+            const data = await this.dependencies.notes.readBinary(image.resolvedPath);
+            signal.throwIfAborted();
+            const result = await this.dependencies.repository.putAttachment(
+              item.pageId,
+              image.attachmentName,
+              data,
+              mimeTypeForPath(image.resolvedPath),
+              signal
+            );
+            yield {
+              type: result === "created" ? "attachment-created" : "attachment-updated",
+              title: item.planned.note.title,
+              filename: image.attachmentName
+            };
+          }
+          signal.throwIfAborted();
+          const current = await this.dependencies.repository.getPage(item.pageId, signal);
+          if (current === null) throw new Error(`Page ${item.pageId} disappeared.`);
+          signal.throwIfAborted();
+          await this.dependencies.repository.updatePage(
+            item.pageId,
+            item.planned.note.title,
+            conversion.storage,
+            current.version,
+            signal
+          );
+          const record = {
+            ...plan.snapshot,
+            pageId: item.pageId,
+            pageUrl: pageUrl(plan.snapshot.baseUrl, item.pageId, (_a = current.webui) != null ? _a : item.webui)
+          };
+          await this.dependencies.notes.writePublication(item.file, record);
+          succeeded++;
+          yield { type: "page-updated", title: item.planned.note.title };
+        } catch (error) {
+          if (isAbort(error, signal)) throw error;
+          failed++;
+          yield {
+            type: "failed",
+            title: item.planned.note.title,
+            phase: "content-update",
+            error: errorMessage(error)
+          };
+        }
+      }
+      yield { type: "complete", succeeded, failed };
+    } catch (error) {
+      if (isAbort(error, signal)) {
+        yield { type: "cancelled", succeeded, failed };
+        return;
+      }
+      failed++;
+      yield { type: "failed", title: null, phase: "preflight", error: errorMessage(error) };
+      yield { type: "complete", succeeded, failed };
+    }
+  }
+  async prepareCandidates(files, destination, signal) {
+    const candidates = [];
+    const filesByPath = /* @__PURE__ */ new Map();
+    const failures = [];
+    for (const file of files) {
+      signal.throwIfAborted();
+      try {
+        const note = await this.dependencies.notes.read(file);
+        const title = resolveTitle(note.basename, note.frontmatter, this.dependencies.settings.titleSource);
+        const conversion = convertMarkdown(
+          selectPublishContent(note, this.dependencies.settings.stripFrontmatter),
+          {
+            sourcePath: note.path,
+            spaceKey: destination.spaceKey,
+            pageTitles: /* @__PURE__ */ new Map(),
+            resolveLink: (target, sourcePath) => this.dependencies.notes.resolveLink(target, sourcePath)
+          }
+        );
+        candidates.push({
+          ...note,
+          title,
+          publication: readPublication(note.frontmatter, destination.id),
+          legacyPublication: readLegacyPublication(note.frontmatter),
+          images: [
+            ...conversion.images,
+            ...conversion.issues.map((issue) => ({ sourcePath: issue.target, resolvedPath: null }))
+          ]
+        });
+        filesByPath.set(note.path, file);
+      } catch (error) {
+        if (isAbort(error, signal)) throw error;
+        failures.push({
+          type: "failed",
+          title: file.path,
+          phase: "preflight",
+          error: errorMessage(error)
+        });
+      }
+    }
+    return failures.length > 0 ? { failures } : { candidates, filesByPath };
+  }
+  async buildPageTitles(destinationId, resolved, signal) {
+    signal.throwIfAborted();
+    const pageTitles = /* @__PURE__ */ new Map();
+    for (const published of await this.dependencies.notes.listPublished(destinationId)) {
+      pageTitles.set(published.path, published.title);
+    }
+    for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
+    return pageTitles;
+  }
+  async rollbackCreatedPage(pageId) {
+    const cleanup = createCleanupSignal();
+    try {
+      await this.dependencies.repository.deletePage(pageId, cleanup.signal);
+      return null;
+    } catch (error) {
+      return error;
+    } finally {
+      cleanup.dispose();
+    }
+  }
+};
+function createCleanupSignal() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS);
+  return {
+    signal: controller.signal,
+    dispose: () => clearTimeout(timer)
+  };
+}
+function validateInput(files, destination, baseUrl) {
+  const failures = [];
+  if (!destination.id.trim() || !destination.spaceKey.trim() || !destination.parentPageId.trim()) {
+    failures.push({ title: null, message: "Destination is incomplete." });
+  }
+  try {
+    const url = new URL(normalizeBaseUrl(baseUrl));
+    if (!url.protocol || !url.host) throw new Error("invalid");
+  } catch (e) {
+    failures.push({ title: null, message: "Confluence base URL is invalid." });
+  }
+  for (const file of files) {
+    if (file.extension.toLowerCase() !== "md") {
+      failures.push({ title: file.path, message: `${file.path} is not a Markdown file.` });
+    }
+  }
+  return failures;
+}
+function resolveTitle(basename, frontmatter, titleSource) {
+  const title = frontmatter.title;
+  return titleSource === "frontmatter" && typeof title === "string" && title.trim() ? title.trim() : basename;
+}
+function pageOwnership(destination, sourcePath) {
+  return { schemaVersion: 1, destinationId: destination.id, sourcePath };
+}
+function resolutionFailure(title, error) {
+  return { type: "failed", title, phase: "page-resolution", error: errorMessage(error) };
+}
+function orphanedPageError(page, ownershipError, cleanupError, baseUrl) {
+  return [
+    `Ownership creation failed: ${errorMessage(ownershipError)}.`,
+    `Rollback failed: ${errorMessage(cleanupError)}.`,
+    `Orphan page ${page.id}: ${pageUrl(baseUrl, page.id, page.webui)}`
+  ].join(" ");
+}
+function pageUrl(baseUrl, pageId, webui) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  const base = new URL(normalized);
+  if (webui !== null) {
+    if (/^[a-z][a-z\d+.-]*:\/\//i.test(webui)) {
+      try {
+        const candidate = new URL(webui);
+        if (candidate.origin === base.origin && candidate.username === "" && candidate.password === "") return candidate.toString();
+      } catch (e) {
+      }
+    } else if (!webui.startsWith("//")) {
+      const basePath = base.pathname.replace(/\/+$/, "");
+      const relativePath = webui.startsWith(`${basePath}/`) ? webui.slice(basePath.length) : webui;
+      try {
+        const candidate = new URL(`${normalized}/${relativePath.replace(/^\/+/, "")}`);
+        const withinBasePath = basePath === "" || candidate.pathname === basePath || candidate.pathname.startsWith(`${basePath}/`);
+        if (candidate.origin === base.origin && withinBasePath) return candidate.toString();
+      } catch (e) {
+      }
+    }
+  }
+  return `${normalized}/pages/viewpage.action?pageId=${encodeURIComponent(pageId)}`;
+}
+function mimeTypeForPath(path) {
+  var _a;
+  const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return (_a = {
     png: "image/png",
     jpg: "image/jpeg",
     jpeg: "image/jpeg",
     gif: "image/gif",
     svg: "image/svg+xml",
     webp: "image/webp"
-  };
-  return map[ext.toLowerCase()] || "application/octet-stream";
+  }[extension]) != null ? _a : "application/octet-stream";
 }
-var Publisher = class {
-  constructor(app, settings) {
-    this.app = app;
-    this.settings = settings;
-    this.client = new ConfluenceClient(
-      settings.confluenceUrl,
-      settings.authType,
-      settings.token,
-      settings.username,
-      settings.password
-    );
-  }
-  async *publish(files, spaceKey, parentPageId) {
-    var _a, _b;
-    yield { type: "start", total: files.length };
-    const entries = [];
-    for (const file of files) {
-      const raw = await this.app.vault.cachedRead(file);
-      const { frontmatter, body } = this.parseFrontmatter(raw);
-      const title = this.resolveTitle(file, frontmatter);
-      const existingId = frontmatter["confluence-page-id"] || null;
-      entries.push({ file, title, frontmatter, body, confluenceId: existingId });
-    }
-    const titleToPath = /* @__PURE__ */ new Map();
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      try {
-        if (entry.confluenceId) {
-          titleToPath.set(entry.title, entry.file.path);
-          yield { type: "page_created", title: entry.title, index: i };
-          continue;
-        }
-        const existingId = await this.client.findPageByTitle(
-          spaceKey,
-          entry.title
-        );
-        if (existingId) {
-          entry.confluenceId = existingId;
-        } else {
-          const page = await this.client.createPage(
-            spaceKey,
-            parentPageId,
-            entry.title,
-            "<p>Importing from Obsidian...</p>"
-          );
-          entry.confluenceId = page.id;
-        }
-        titleToPath.set(entry.title, entry.file.path);
-        yield { type: "page_created", title: entry.title, index: i };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        yield { type: "error", title: entry.title, error: msg };
-        entry.confluenceId = null;
-      }
-    }
-    const publishedFiles = /* @__PURE__ */ new Map();
-    for (const entry of entries) {
-      if (entry.confluenceId) {
-        publishedFiles.set(entry.file.path, entry.title);
-      }
-    }
-    let succeeded = 0;
-    let failed = 0;
-    let skipped = 0;
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      if (!entry.confluenceId) {
-        skipped++;
-        continue;
-      }
-      try {
-        const conversion = convertMarkdown(entry.body, {
-          sourcePath: entry.file.path,
-          spaceKey,
-          pageTitles: publishedFiles,
-          resolveLink: (target, sourcePath) => {
-            var _a2, _b2;
-            return (_b2 = (_a2 = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)) == null ? void 0 : _a2.path) != null ? _b2 : null;
-          }
-        });
-        if (conversion.issues.length > 0) {
-          const targets = conversion.issues.map((issue) => issue.target).join(", ");
-          throw new Error(`Unresolved image attachments: ${targets}`);
-        }
-        const storageBody = conversion.storage;
-        const { uploaded } = await this.uploadImages(
-          entry.confluenceId,
-          conversion.images
-        );
-        for (const filename of uploaded) {
-          yield { type: "image_uploaded", filename };
-        }
-        const currentPage = await this.client.getPage(entry.confluenceId);
-        await this.client.updatePage(
-          entry.confluenceId,
-          entry.title,
-          storageBody,
-          currentPage.version.number
-        );
-        const webui = (_b = (_a = currentPage._links) == null ? void 0 : _a.webui) != null ? _b : `/pages/viewpage.action?pageId=${entry.confluenceId}`;
-        await this.writeFrontmatterId(
-          entry.file,
-          entry.confluenceId,
-          webui
-        );
-        succeeded++;
-        yield { type: "page_updated", title: entry.title, index: i };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        failed++;
-        yield { type: "error", title: entry.title, error: msg };
-      }
-    }
-    yield { type: "complete", succeeded, failed, skipped };
-  }
-  parseFrontmatter(raw) {
-    const match = raw.match(FRONTMATTER_RE);
-    if (!match) {
-      return { frontmatter: {}, body: raw };
-    }
-    try {
-      const fm = (0, import_obsidian5.parseYaml)(match[1]) || {};
-      const body = raw.slice(match[0].length);
-      return { frontmatter: fm, body };
-    } catch (e) {
-      return { frontmatter: {}, body: raw };
-    }
-  }
-  resolveTitle(file, frontmatter) {
-    let title;
-    if (this.settings.titleSource === "frontmatter" && typeof frontmatter["title"] === "string" && frontmatter["title"].trim()) {
-      title = frontmatter["title"].trim();
-    } else {
-      title = file.basename;
-    }
-    return title;
-  }
-  async uploadImages(pageId, images) {
-    const uploaded = [];
-    const skipped = [];
-    let existing;
-    try {
-      existing = await this.client.getAttachmentFilenames(pageId);
-    } catch (e) {
-      existing = /* @__PURE__ */ new Set();
-    }
-    for (const img of images) {
-      const file = this.app.vault.getAbstractFileByPath(img.resolvedPath);
-      if (!file || !(file instanceof import_obsidian5.TFile)) {
-        throw new Error(`Resolved attachment is not a file: ${img.resolvedPath}`);
-      }
-      if (existing.has(img.attachmentName)) {
-        console.log(`[confluence-publisher] Skipping already uploaded: ${img.attachmentName}`);
-        skipped.push(img.attachmentName);
-        continue;
-      }
-      try {
-        const data = await this.app.vault.readBinary(file);
-        const mimeType = getMimeType(file.extension);
-        await this.client.uploadAttachment(
-          pageId,
-          img.attachmentName,
-          data,
-          mimeType
-        );
-        uploaded.push(img.attachmentName);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        throw new Error(
-          `Failed to upload attachment ${img.attachmentName}: ${message}`
-        );
-      }
-    }
-    return { uploaded, skipped };
-  }
-  async writeFrontmatterId(file, pageId, webui) {
-    const raw = await this.app.vault.read(file);
-    const confluenceUrl = `${this.settings.confluenceUrl}${webui}`;
-    const match = raw.match(FRONTMATTER_RE);
-    if (match) {
-      try {
-        const fm = (0, import_obsidian5.parseYaml)(match[1]) || {};
-        fm["confluence-page-id"] = pageId;
-        fm["confluence-url"] = confluenceUrl;
-        const newFm = `---
-${(0, import_obsidian5.stringifyYaml)(fm)}---
-`;
-        const newContent = newFm + raw.slice(match[0].length);
-        await this.app.vault.modify(file, newContent);
-      } catch (e) {
-      }
-    } else {
-      const fm = {
-        "confluence-page-id": pageId,
-        "confluence-url": confluenceUrl
-      };
-      const newContent = `---
-${(0, import_obsidian5.stringifyYaml)(fm)}---
-${raw}`;
-      await this.app.vault.modify(file, newContent);
-    }
+function isAbort(error, signal) {
+  return signal.aborted || error instanceof DOMException && error.name === "AbortError";
+}
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// src/confluence/transport.ts
+var nodeHttp = __toESM(require("http"));
+var nodeHttps = __toESM(require("https"));
+var TransportError = class extends Error {
+  constructor(code, message, status = null) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.name = "TransportError";
   }
 };
+var DEFAULT_TIMEOUT_MS = 3e4;
+var DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+function validateConfluenceBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch (e) {
+    throw new TransportError("invalid-url", "Confluence URL is invalid.");
+  }
+  const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new TransportError(
+      "invalid-url",
+      "Confluence URL must use HTTPS unless it targets loopback."
+    );
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new TransportError(
+      "invalid-url",
+      "Confluence URL must not contain credentials, a query, or a fragment."
+    );
+  }
+  return url;
+}
+var NodeHttpTransport = class {
+  constructor(options2) {
+    var _a, _b;
+    this.baseUrl = validateConfluenceBaseUrl(options2.baseUrl);
+    this.headers = { ...options2.headers };
+    this.timeoutMs = (_a = options2.timeoutMs) != null ? _a : DEFAULT_TIMEOUT_MS;
+    this.maxResponseBytes = (_b = options2.maxResponseBytes) != null ? _b : DEFAULT_MAX_RESPONSE_BYTES;
+    if (!Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes <= 0) {
+      throw new TransportError(
+        "invalid-options",
+        "Confluence response byte limit must be a positive safe integer."
+      );
+    }
+  }
+  requestJson(request) {
+    return this.request(request, true);
+  }
+  requestEmpty(request) {
+    return this.request(request, false);
+  }
+  request(request, expectJson) {
+    var _a;
+    if ((_a = request.signal) == null ? void 0 : _a.aborted) {
+      return Promise.reject(new TransportError("aborted", "Confluence request was cancelled."));
+    }
+    let url;
+    try {
+      url = joinRequestUrl(this.baseUrl, request.path);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const transport = url.protocol === "https:" ? nodeHttps : nodeHttp;
+    const headers = { ...this.headers, ...request.headers };
+    if (request.body !== void 0 && !hasHeader(headers, "content-length") && !hasHeader(headers, "transfer-encoding")) {
+      headers["Content-Length"] = String(
+        typeof request.body === "string" ? Buffer.byteLength(request.body) : request.body.byteLength
+      );
+    }
+    return new Promise((resolve, reject) => {
+      var _a2;
+      let settled = false;
+      let timer;
+      const cleanup = () => {
+        var _a3;
+        if (timer !== void 0) clearTimeout(timer);
+        (_a3 = request.signal) == null ? void 0 : _a3.removeEventListener("abort", abort);
+      };
+      const succeed = (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const abort = () => {
+        fail(new TransportError("aborted", "Confluence request was cancelled."));
+        req.destroy();
+      };
+      const req = transport.request({
+        protocol: url.protocol,
+        hostname: unbracketHostname(url.hostname),
+        port: url.port || void 0,
+        path: `${url.pathname}${url.search}`,
+        method: request.method,
+        headers
+      }, (response) => {
+        var _a3;
+        const chunks = [];
+        const status = (_a3 = response.statusCode) != null ? _a3 : 0;
+        let receivedBytes = 0;
+        const failResponseTooLarge = () => {
+          if (settled) return;
+          fail(new TransportError(
+            "response-too-large",
+            "Confluence response exceeded the configured byte limit.",
+            status
+          ));
+          response.destroy();
+          req.destroy();
+        };
+        response.on("data", (chunk) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          receivedBytes += buffer.byteLength;
+          if (receivedBytes > this.maxResponseBytes) {
+            failResponseTooLarge();
+            return;
+          }
+          chunks.push(buffer);
+        });
+        response.once("aborted", () => {
+          fail(new TransportError("network", "Confluence response was interrupted."));
+        });
+        response.once("error", () => {
+          fail(new TransportError("network", "Confluence response failed."));
+        });
+        const contentLength = parseContentLength(response.headers["content-length"]);
+        if (contentLength !== null && contentLength > this.maxResponseBytes) {
+          failResponseTooLarge();
+          return;
+        }
+        response.once("end", () => {
+          var _a4;
+          if (settled) return;
+          const body = Buffer.concat(chunks).toString("utf8");
+          if (status >= 300 && status < 400) {
+            const rawLocation = safeRedirectLocation(response.headers.location, url);
+            const location = rawLocation === null ? null : sanitizeDiagnostic(rawLocation, headers);
+            fail(new TransportError(
+              "redirect",
+              location ? `Confluence redirected the request to ${location}. Check the configured URL and authentication.` : "Confluence redirected the request. Check the configured URL and authentication.",
+              status
+            ));
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            fail(new TransportError(
+              "http",
+              `Confluence request failed (${status}): ${sanitizeDiagnostic(body, headers).slice(0, 300)}`,
+              status
+            ));
+            return;
+          }
+          if (!expectJson) {
+            succeed(void 0);
+            return;
+          }
+          const contentType = String((_a4 = response.headers["content-type"]) != null ? _a4 : "");
+          if (!isJsonContentType(contentType)) {
+            fail(new TransportError(
+              "content-type",
+              "Confluence returned a successful response that was not JSON.",
+              status
+            ));
+            return;
+          }
+          try {
+            succeed(JSON.parse(body));
+          } catch (e) {
+            fail(new TransportError(
+              "json",
+              "Confluence returned malformed JSON.",
+              status
+            ));
+          }
+        });
+      });
+      req.once("error", () => {
+        fail(new TransportError("network", "Confluence request failed at the network layer."));
+      });
+      (_a2 = request.signal) == null ? void 0 : _a2.addEventListener("abort", abort, { once: true });
+      timer = setTimeout(() => {
+        fail(new TransportError("timeout", "Confluence request timed out."));
+        req.destroy();
+      }, this.timeoutMs);
+      if (request.body !== void 0) req.write(request.body);
+      req.end();
+    });
+  }
+};
+function joinRequestUrl(baseUrl, path) {
+  const url = new URL(baseUrl.toString());
+  const question = path.indexOf("?");
+  const pathname = question === -1 ? path : path.slice(0, question);
+  const search = question === -1 ? "" : path.slice(question);
+  if (/%(?:2f|5c)/i.test(pathname)) {
+    throw new TransportError(
+      "invalid-url",
+      "Confluence request pathname must not contain encoded path separators."
+    );
+  }
+  const contextPath = url.pathname.replace(/\/+$/, "");
+  const requestPath = pathname.replace(/^\/+/, "");
+  url.pathname = `${contextPath}/${requestPath}` || "/";
+  url.search = search;
+  url.hash = "";
+  if (contextPath !== "" && url.pathname !== contextPath && !url.pathname.startsWith(`${contextPath}/`)) {
+    throw new TransportError(
+      "invalid-url",
+      "Confluence request path must stay within the configured context path."
+    );
+  }
+  return url;
+}
+function isJsonContentType(contentType) {
+  return /^application\/(?:[A-Za-z0-9!#$&^_.+-]+\+)?json(?:\s*;|\s*$)/i.test(contentType);
+}
+function parseContentLength(value) {
+  if (value === void 0 || !/^\d+$/.test(value)) return null;
+  const length = Number(value);
+  return Number.isSafeInteger(length) ? length : null;
+}
+function hasHeader(headers, expectedName) {
+  return Object.keys(headers).some((name) => name.toLowerCase() === expectedName);
+}
+function unbracketHostname(hostname) {
+  return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+}
+function safeRedirectLocation(location, requestUrl) {
+  if (!location) return null;
+  try {
+    const url = new URL(location, requestUrl);
+    return location.startsWith("/") ? url.pathname : `${url.origin}${url.pathname}`;
+  } catch (e) {
+    return null;
+  }
+}
+function sanitizeDiagnostic(value, headers) {
+  const secrets = collectCredentialSecrets(headers).flatMap(credentialVariants).filter((secret, index, values) => secret.length > 0 && values.indexOf(secret) === index).sort((left, right) => right.length - left.length);
+  return secrets.reduce(
+    (sanitized, secret) => sanitized.replace(
+      new RegExp(escapeRegExp(secret), "gi"),
+      "[REDACTED]"
+    ),
+    value
+  );
+}
+function collectCredentialSecrets(headers) {
+  var _a, _b;
+  const secrets = [];
+  for (const [name, value] of Object.entries(headers)) {
+    const lowerName = name.toLowerCase();
+    if (lowerName === "cookie") {
+      secrets.push(value);
+      for (const pair of value.split(";")) {
+        const trimmed = pair.trim();
+        if (trimmed.length === 0) continue;
+        secrets.push(trimmed);
+        const equals = trimmed.indexOf("=");
+        if (equals !== -1) secrets.push(unquote(trimmed.slice(equals + 1).trim()));
+      }
+      continue;
+    }
+    if (lowerName !== "authorization" && lowerName !== "proxy-authorization") continue;
+    secrets.push(value);
+    const match = /^\s*(\S+)(?:\s+([\s\S]+))?$/.exec(value);
+    const scheme = (_a = match == null ? void 0 : match[1]) == null ? void 0 : _a.toLowerCase();
+    const credential = (_b = match == null ? void 0 : match[2]) == null ? void 0 : _b.trim();
+    if (!credential) continue;
+    secrets.push(credential);
+    if (scheme === "basic") {
+      const decoded = Buffer.from(credential, "base64").toString("utf8");
+      if (decoded.length > 0) secrets.push(decoded);
+      const colon = decoded.indexOf(":");
+      if (colon !== -1) secrets.push(decoded.slice(colon + 1));
+    }
+  }
+  return secrets;
+}
+function credentialVariants(secret) {
+  const variants = [secret, encodeURIComponent(secret)];
+  try {
+    const decoded = decodeURIComponent(secret);
+    if (decoded !== secret) variants.push(decoded, encodeURIComponent(decoded));
+  } catch (e) {
+  }
+  return variants;
+}
+function unquote(value) {
+  return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// src/confluence/repository.ts
+var PAGE_EXPAND = "version,ancestors,space,metadata.properties.obsidian-confluence-publisher";
+var ATTACHMENT_LIMIT = 100;
+var ConfluenceRepository = class {
+  constructor(transport) {
+    this.transport = transport;
+    this.attachmentCache = /* @__PURE__ */ new Map();
+    this.uploadedAttachmentAliases = /* @__PURE__ */ new Map();
+  }
+  async getPage(pageId, signal) {
+    try {
+      const page = await this.transport.requestJson({
+        method: "GET",
+        path: `/rest/api/content/${encodeURIComponent(pageId)}?expand=${encodeURIComponent(PAGE_EXPAND)}`,
+        signal
+      });
+      return resolvePage(page);
+    } catch (error) {
+      if (error instanceof TransportError && error.status === 404) return null;
+      throw error;
+    }
+  }
+  async findPagesByTitle(spaceKey, title, signal) {
+    var _a;
+    const query = new URLSearchParams({
+      type: "page",
+      spaceKey,
+      title,
+      expand: PAGE_EXPAND,
+      limit: String(ATTACHMENT_LIMIT)
+    });
+    let path = `/rest/api/content?${query.toString()}`;
+    const visited = /* @__PURE__ */ new Set();
+    const pages = [];
+    while (path !== void 0) {
+      assertUnvisited(path, visited, "page search");
+      const collection = pageCollection(await this.transport.requestJson({
+        method: "GET",
+        path,
+        signal
+      }), isPageResponse, "page");
+      pages.push(...collection.results.map((page) => resolvePage(page)));
+      path = (_a = collection._links) == null ? void 0 : _a.next;
+    }
+    return pages;
+  }
+  async createPage(spaceKey, parentId, title, body, signal) {
+    const page = await this.transport.requestJson({
+      method: "POST",
+      path: "/rest/api/content",
+      body: JSON.stringify({
+        type: "page",
+        title,
+        space: { key: spaceKey },
+        ancestors: [{ id: parentId }],
+        body: { storage: { value: body, representation: "storage" } }
+      }),
+      headers: { "Content-Type": "application/json" },
+      signal
+    });
+    return resolvePage(page, { spaceKey, parentPageId: parentId });
+  }
+  async setPageOwnership(pageId, ownership, signal) {
+    await this.transport.requestJson({
+      method: "POST",
+      path: `/rest/api/content/${encodeURIComponent(pageId)}/property`,
+      body: JSON.stringify({ key: PAGE_OWNERSHIP_PROPERTY, value: ownership }),
+      headers: { "Content-Type": "application/json" },
+      signal
+    });
+  }
+  async deletePage(pageId, signal) {
+    await this.transport.requestEmpty({
+      method: "DELETE",
+      path: `/rest/api/content/${encodeURIComponent(pageId)}`,
+      signal
+    });
+  }
+  async updatePage(pageId, title, body, currentVersion, signal) {
+    await this.transport.requestEmpty({
+      method: "PUT",
+      path: `/rest/api/content/${encodeURIComponent(pageId)}`,
+      body: JSON.stringify({
+        type: "page",
+        title,
+        version: { number: currentVersion + 1 },
+        body: { storage: { value: body, representation: "storage" } }
+      }),
+      headers: { "Content-Type": "application/json" },
+      signal
+    });
+  }
+  async listAttachments(pageId, signal) {
+    var _a;
+    const cached = this.attachmentCache.get(pageId);
+    if (cached !== void 0) return cached;
+    let path = `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment?limit=${ATTACHMENT_LIMIT}&expand=metadata`;
+    const visited = /* @__PURE__ */ new Set();
+    const attachments = /* @__PURE__ */ new Map();
+    while (path !== void 0) {
+      assertUnvisited(path, visited, "attachment listing");
+      const collection = pageCollection(await this.transport.requestJson({
+        method: "GET",
+        path,
+        signal
+      }), isAttachmentResponse, "attachment");
+      for (const attachment of collection.results) {
+        attachments.set(attachment.title, attachment);
+      }
+      path = (_a = collection._links) == null ? void 0 : _a.next;
+    }
+    this.attachmentCache.set(pageId, attachments);
+    return attachments;
+  }
+  async putAttachment(pageId, filename, data, mimeType, signal) {
+    var _a, _b;
+    const multipart = buildMultipart(filename, data, mimeType);
+    const attachments = await this.listAttachments(pageId, signal);
+    const existing = (_b = attachments.get(filename)) != null ? _b : (_a = this.uploadedAttachmentAliases.get(pageId)) == null ? void 0 : _a.get(filename);
+    const encodedPageId = encodeURIComponent(pageId);
+    const path = existing === void 0 ? `/rest/api/content/${encodedPageId}/child/attachment` : `/rest/api/content/${encodedPageId}/child/attachment/${encodeURIComponent(existing.id)}/data`;
+    const response = await this.transport.requestJson({
+      method: "POST",
+      path,
+      body: multipart.body,
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${multipart.boundary}`,
+        "X-Atlassian-Token": "nocheck"
+      },
+      signal
+    });
+    const returned = attachmentFromUpload(response);
+    if (existing !== void 0) {
+      attachments.delete(filename);
+      attachments.delete(existing.title);
+    }
+    attachments.set(returned.title, returned);
+    let aliases = this.uploadedAttachmentAliases.get(pageId);
+    if (aliases === void 0) {
+      aliases = /* @__PURE__ */ new Map();
+      this.uploadedAttachmentAliases.set(pageId, aliases);
+    }
+    aliases.set(filename, returned);
+    return existing === void 0 ? "created" : "updated";
+  }
+};
+function resolvePage(value, fallback) {
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+  if (!isPageResponse(value)) throw new Error("Confluence returned an invalid page response.");
+  const page = value;
+  const ancestors = (_a = page.ancestors) != null ? _a : [];
+  return {
+    id: page.id,
+    title: page.title,
+    spaceKey: (_d = (_c = (_b = page.space) == null ? void 0 : _b.key) != null ? _c : fallback == null ? void 0 : fallback.spaceKey) != null ? _d : "",
+    parentPageId: ancestors.length === 0 ? (_e = fallback == null ? void 0 : fallback.parentPageId) != null ? _e : null : (_g = (_f = ancestors[ancestors.length - 1]) == null ? void 0 : _f.id) != null ? _g : null,
+    version: page.version.number,
+    webui: (_i = (_h = page._links) == null ? void 0 : _h.webui) != null ? _i : null,
+    ownership: readOwnership(page)
+  };
+}
+function readOwnership(page) {
+  const metadata = page.metadata;
+  if (metadata === void 0) return null;
+  if (!isRecord2(metadata) || Array.isArray(metadata)) {
+    throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
+  }
+  const properties = metadata.properties;
+  if (properties === void 0) return null;
+  if (!isRecord2(properties) || Array.isArray(properties)) {
+    throw new Error(`Confluence page ${page.id} has invalid ownership metadata.`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(properties, PAGE_OWNERSHIP_PROPERTY)) {
+    return null;
+  }
+  const property = properties[PAGE_OWNERSHIP_PROPERTY];
+  const value = isRecord2(property) ? property.value : void 0;
+  if (typeof value !== "object" || value === null || !("schemaVersion" in value) || value.schemaVersion !== 1 || !("destinationId" in value) || typeof value.destinationId !== "string" || value.destinationId.length === 0 || !("sourcePath" in value) || typeof value.sourcePath !== "string" || value.sourcePath.length === 0) {
+    throw new Error(`Confluence page ${page.id} has invalid ownership property data.`);
+  }
+  return {
+    schemaVersion: 1,
+    destinationId: value.destinationId,
+    sourcePath: value.sourcePath
+  };
+}
+function assertUnvisited(path, visited, operation) {
+  if (visited.has(path)) throw new Error(`Confluence returned a pagination cycle during ${operation}.`);
+  visited.add(path);
+}
+function attachmentFromUpload(response) {
+  const attachment = isRecord2(response) && "results" in response ? pageCollection(response, isAttachmentResponse, "attachment").results[0] : response;
+  if (attachment === void 0) throw new Error("Confluence attachment upload returned no attachment.");
+  if (!isAttachmentResponse(attachment)) {
+    throw new Error("Confluence returned an invalid attachment response.");
+  }
+  return attachment;
+}
+function buildMultipart(filename, data, mimeType) {
+  const quotedFilename = quoteMultipartFilename(filename);
+  if (/[\r\n]/.test(mimeType)) throw new Error("Attachment MIME type contains a line break.");
+  if (/[\x00-\x1f\x7f]/.test(mimeType)) {
+    throw new Error("Attachment MIME type contains a control character.");
+  }
+  const fileBytes = new Uint8Array(data);
+  let boundary = "----obsidian-confluence-publisher-1";
+  while (containsBytes(fileBytes, new TextEncoder().encode(boundary))) boundary += "-1";
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode(
+    `--${boundary}\r
+Content-Disposition: form-data; name="file"; filename="${quotedFilename}"\r
+Content-Type: ${mimeType}\r
+\r
+`
+  );
+  const suffix = encoder.encode(`\r
+--${boundary}--\r
+`);
+  const body = new Uint8Array(prefix.length + fileBytes.length + suffix.length);
+  body.set(prefix, 0);
+  body.set(fileBytes, prefix.length);
+  body.set(suffix, prefix.length + fileBytes.length);
+  return { boundary, body };
+}
+function quoteMultipartFilename(filename) {
+  if (/[\r\n]/.test(filename)) throw new Error("Attachment filename contains a line break.");
+  if (/[\x00-\x1f\x7f]/.test(filename)) {
+    throw new Error("Attachment filename contains a control character.");
+  }
+  return filename.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+function pageCollection(value, isItem, itemName) {
+  if (!isRecord2(value) || !Array.isArray(value.results) || !value.results.every(isItem) || typeof value.size !== "number") {
+    throw new Error(`Confluence returned an invalid ${itemName} collection response.`);
+  }
+  if (value._links !== void 0 && (!isRecord2(value._links) || value._links.next !== void 0 && typeof value._links.next !== "string")) {
+    throw new Error(`Confluence returned an invalid ${itemName} collection response.`);
+  }
+  return value;
+}
+function isPageResponse(value) {
+  if (!isRecord2(value) || typeof value.id !== "string" || value.id.length === 0 || typeof value.title !== "string" || !isRecord2(value.version) || typeof value.version.number !== "number" || !Number.isSafeInteger(value.version.number)) return false;
+  if (value.space !== void 0 && (!isRecord2(value.space) || typeof value.space.key !== "string")) return false;
+  if (value.ancestors !== void 0 && (!Array.isArray(value.ancestors) || !value.ancestors.every((ancestor) => isRecord2(ancestor) && typeof ancestor.id === "string"))) return false;
+  return true;
+}
+function isAttachmentResponse(value) {
+  return isRecord2(value) && typeof value.id === "string" && value.id.length > 0 && typeof value.title === "string";
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null;
+}
+function containsBytes(haystack, needle) {
+  outer: for (let start = 0; start <= haystack.length - needle.length; start += 1) {
+    for (let index = 0; index < needle.length; index += 1) {
+      if (haystack[start + index] !== needle[index]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
 
 // src/main.ts
 var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
@@ -3880,14 +4624,26 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
   async runPublish(files, destination) {
     const progressModal = new ProgressModal(this.app);
     progressModal.open();
-    const publisher = new Publisher(this.app, this.settings);
     try {
+      validateConfluenceBaseUrl(this.settings.confluenceUrl);
+      const authorization = this.settings.authType === "pat" ? `Bearer ${this.settings.token}` : `Basic ${Buffer.from(`${this.settings.username}:${this.settings.password}`).toString("base64")}`;
+      const publisher = new Publisher({
+        notes: new ObsidianNoteRepository(this.app),
+        repository: new ConfluenceRepository(new NodeHttpTransport({
+          baseUrl: this.settings.confluenceUrl,
+          headers: { Authorization: authorization, Accept: "application/json" }
+        })),
+        settings: this.settings
+      });
+      let pageIndex = 0;
       for await (const event of publisher.publish(
         files,
-        destination.spaceKey,
-        destination.parentPageId
+        destination,
+        new AbortController().signal
       )) {
-        progressModal.handleEvent(event);
+        const legacyEvent = toLegacyProgressEvent(event, pageIndex);
+        if (event.type === "page-created" || event.type === "page-updated") pageIndex++;
+        if (legacyEvent !== null) progressModal.handleEvent(legacyEvent);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -3912,3 +4668,23 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
     return files;
   }
 };
+function toLegacyProgressEvent(event, index) {
+  var _a;
+  switch (event.type) {
+    case "planned":
+      return { type: "start", total: event.total };
+    case "page-created":
+      return { type: "page_created", title: event.title, index };
+    case "attachment-created":
+    case "attachment-updated":
+      return { type: "image_uploaded", filename: event.filename };
+    case "page-updated":
+      return { type: "page_updated", title: event.title, index };
+    case "failed":
+      return { type: "error", title: (_a = event.title) != null ? _a : "Publish", error: event.error };
+    case "cancelled":
+      return { type: "complete", succeeded: event.succeeded, failed: event.failed, skipped: 0 };
+    case "complete":
+      return { type: "complete", succeeded: event.succeeded, failed: event.failed, skipped: 0 };
+  }
+}

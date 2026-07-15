@@ -28,11 +28,6 @@ export interface ConfluencePageCollection<T> {
   _links?: { next?: string };
 }
 
-// Task 11 removes the legacy client and these compatibility names.
-export type ConfluencePage = ConfluencePageResponse;
-export type ConfluenceSearchResult = ConfluencePageCollection<ConfluencePageResponse>;
-export type ConfluenceAttachment = ConfluenceAttachmentResponse;
-
 // ---------------------------------------------------------------------------
 // Progress reporting
 // ---------------------------------------------------------------------------

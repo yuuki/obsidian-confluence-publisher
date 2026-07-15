@@ -1,285 +1,451 @@
-import { App, TFile, parseYaml, stringifyYaml } from 'obsidian';
-import { ConfluenceClient } from './confluence/client';
-import { ProgressEvent } from './confluence/types';
-import { ConfluencePublisherSettings } from './settings';
 import { convertMarkdown } from './converter/storage-renderer';
-import type { EmbeddedImage } from './domain/publication';
+import {
+	normalizeBaseUrl,
+	type Destination,
+	type NoteCandidate,
+	type PageOwnership,
+	type PlannedPage,
+	type PublicationRecord,
+	type PublishRepository,
+	type ResolvedPage,
+} from './domain/publication';
+import {
+	readLegacyPublication,
+	readPublication,
+} from './domain/publication-metadata';
+import { buildPublicationPlan } from './domain/publication-planner';
+import type { ConfluencePublisherSettings } from './domain/settings';
+import {
+	selectPublishContent,
+	type NoteFileRef,
+	type NoteRepository,
+} from './obsidian/note-repository';
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+const PLACEHOLDER_BODY = '<p>Importing from Obsidian...</p>';
+const CLEANUP_TIMEOUT_MS = 5_000;
 
-interface PageEntry {
-	file: TFile;
-	title: string;
-	frontmatter: Record<string, unknown>;
-	body: string;
-	confluenceId: string | null;
+export type ProgressEvent =
+	| { type: 'planned'; total: number }
+	| { type: 'page-created'; title: string }
+	| { type: 'attachment-created' | 'attachment-updated'; title: string; filename: string }
+	| { type: 'page-updated'; title: string }
+	| {
+		type: 'failed';
+		title: string | null;
+		phase: 'preflight' | 'page-resolution' | 'content-update';
+		error: string;
+	}
+	| { type: 'cancelled'; succeeded: number; failed: number }
+	| { type: 'complete'; succeeded: number; failed: number };
+
+export interface PublisherDependencies {
+	notes: NoteRepository;
+	repository: PublishRepository;
+	settings: Pick<
+		ConfluencePublisherSettings,
+		'confluenceUrl' | 'stripFrontmatter' | 'titleSource'
+	>;
 }
 
-function getMimeType(ext: string): string {
-	const map: Record<string, string> = {
+export interface CleanupSignal {
+	signal: AbortSignal;
+	dispose(): void;
+}
+
+interface PreparedPage {
+	file: NoteFileRef;
+	planned: PlannedPage;
+	pageId: string;
+	webui: string | null;
+}
+
+export class Publisher {
+	constructor(private readonly dependencies: PublisherDependencies) {}
+
+	async *publish(
+		files: NoteFileRef[],
+		destination: Destination,
+		signal: AbortSignal,
+	): AsyncGenerator<ProgressEvent> {
+		let succeeded = 0;
+		let failed = 0;
+
+		try {
+			signal.throwIfAborted();
+			const inputErrors = validateInput(files, destination, this.dependencies.settings.confluenceUrl);
+			if (inputErrors.length > 0) {
+				for (const error of inputErrors) {
+					yield { type: 'failed', title: error.title, phase: 'preflight', error: error.message };
+				}
+				yield { type: 'complete', succeeded: 0, failed: inputErrors.length };
+				return;
+			}
+
+			const prepared = await this.prepareCandidates(files, destination, signal);
+			if ('failures' in prepared) {
+				for (const failure of prepared.failures) yield failure;
+				yield { type: 'complete', succeeded: 0, failed: prepared.failures.length };
+				return;
+			}
+
+			const plan = await buildPublicationPlan({
+				baseUrl: this.dependencies.settings.confluenceUrl,
+				destination,
+				notes: prepared.candidates,
+				repository: this.dependencies.repository,
+				signal,
+			});
+			if (!plan.ok) {
+				for (const issue of plan.issues) {
+					yield {
+						type: 'failed',
+						title: issue.path,
+						phase: 'preflight',
+						error: issue.message,
+					};
+				}
+				yield { type: 'complete', succeeded: 0, failed: plan.issues.length };
+				return;
+			}
+
+			yield { type: 'planned', total: plan.pages.length };
+			const resolved: PreparedPage[] = [];
+			for (const planned of plan.pages) {
+				signal.throwIfAborted();
+				const file = prepared.filesByPath.get(planned.note.path);
+				if (file === undefined) throw new Error(`Prepared note is missing: ${planned.note.path}`);
+				const ownership = pageOwnership(destination, planned.note.path);
+				if (planned.operation === 'create') {
+					let page: ResolvedPage;
+					try {
+						page = await this.dependencies.repository.createPage(
+							plan.snapshot.spaceKey,
+							plan.snapshot.parentPageId,
+							planned.note.title,
+							PLACEHOLDER_BODY,
+							signal,
+						);
+					} catch (error) {
+						if (isAbort(error, signal)) throw error;
+						failed++;
+						yield resolutionFailure(planned.note.title, error);
+						yield { type: 'complete', succeeded, failed };
+						return;
+					}
+
+					try {
+						signal.throwIfAborted();
+						await this.dependencies.repository.setPageOwnership(page.id, ownership, signal);
+					} catch (ownershipError) {
+						const cleanupError = await this.rollbackCreatedPage(page.id);
+						if (cleanupError !== null) {
+							failed++;
+							yield {
+								type: 'failed',
+								title: planned.note.title,
+								phase: 'page-resolution',
+								error: orphanedPageError(page, ownershipError, cleanupError, plan.snapshot.baseUrl),
+							};
+						}
+						if (isAbort(ownershipError, signal)) throw ownershipError;
+						if (cleanupError === null) {
+							failed++;
+							yield resolutionFailure(planned.note.title, ownershipError);
+						}
+						yield { type: 'complete', succeeded, failed };
+						return;
+					}
+					yield { type: 'page-created', title: planned.note.title };
+					resolved.push({ file, planned, pageId: page.id, webui: page.webui });
+					continue;
+				}
+
+				const pageId = planned.pageId as string;
+				if (planned.claimOwnership) {
+					try {
+						signal.throwIfAborted();
+						await this.dependencies.repository.setPageOwnership(pageId, ownership, signal);
+					} catch (error) {
+						if (isAbort(error, signal)) throw error;
+						failed++;
+						yield resolutionFailure(planned.note.title, error);
+						yield { type: 'complete', succeeded, failed };
+						return;
+					}
+				}
+				resolved.push({ file, planned, pageId, webui: null });
+			}
+
+			const pageTitles = await this.buildPageTitles(destination.id, resolved, signal);
+			for (const item of resolved) {
+				signal.throwIfAborted();
+				try {
+					const conversion = convertMarkdown(
+						selectPublishContent(item.planned.note, this.dependencies.settings.stripFrontmatter),
+						{
+							sourcePath: item.planned.note.path,
+							spaceKey: destination.spaceKey,
+							pageTitles,
+							resolveLink: (target, sourcePath) =>
+								this.dependencies.notes.resolveLink(target, sourcePath),
+						},
+					);
+					if (conversion.issues.length > 0) {
+						throw new Error(`Unresolved image attachments: ${conversion.issues.map((issue) => issue.target).join(', ')}`);
+					}
+
+					const images = new Map(conversion.images.map((image) => [image.attachmentName, image]));
+					for (const image of images.values()) {
+						signal.throwIfAborted();
+						const data = await this.dependencies.notes.readBinary(image.resolvedPath);
+						signal.throwIfAborted();
+						const result = await this.dependencies.repository.putAttachment(
+							item.pageId,
+							image.attachmentName,
+							data,
+							mimeTypeForPath(image.resolvedPath),
+							signal,
+						);
+						yield {
+							type: result === 'created' ? 'attachment-created' : 'attachment-updated',
+							title: item.planned.note.title,
+							filename: image.attachmentName,
+						};
+					}
+
+					signal.throwIfAborted();
+					const current = await this.dependencies.repository.getPage(item.pageId, signal);
+					if (current === null) throw new Error(`Page ${item.pageId} disappeared.`);
+					signal.throwIfAborted();
+					await this.dependencies.repository.updatePage(
+						item.pageId,
+						item.planned.note.title,
+						conversion.storage,
+						current.version,
+						signal,
+					);
+					const record: PublicationRecord = {
+						...plan.snapshot,
+						pageId: item.pageId,
+						pageUrl: pageUrl(plan.snapshot.baseUrl, item.pageId, current.webui ?? item.webui),
+					};
+					await this.dependencies.notes.writePublication(item.file, record);
+					succeeded++;
+					yield { type: 'page-updated', title: item.planned.note.title };
+				} catch (error) {
+					if (isAbort(error, signal)) throw error;
+					failed++;
+					yield {
+						type: 'failed',
+						title: item.planned.note.title,
+						phase: 'content-update',
+						error: errorMessage(error),
+					};
+				}
+			}
+
+			yield { type: 'complete', succeeded, failed };
+		} catch (error) {
+			if (isAbort(error, signal)) {
+				yield { type: 'cancelled', succeeded, failed };
+				return;
+			}
+			failed++;
+			yield { type: 'failed', title: null, phase: 'preflight', error: errorMessage(error) };
+			yield { type: 'complete', succeeded, failed };
+		}
+	}
+
+	private async prepareCandidates(
+		files: NoteFileRef[],
+		destination: Destination,
+		signal: AbortSignal,
+	): Promise<{
+		candidates: NoteCandidate[];
+		filesByPath: Map<string, NoteFileRef>;
+	} | { failures: Extract<ProgressEvent, { type: 'failed' }>[] }> {
+		const candidates: NoteCandidate[] = [];
+		const filesByPath = new Map<string, NoteFileRef>();
+		const failures: Extract<ProgressEvent, { type: 'failed' }>[] = [];
+		for (const file of files) {
+			signal.throwIfAborted();
+			try {
+				const note = await this.dependencies.notes.read(file);
+				const title = resolveTitle(note.basename, note.frontmatter, this.dependencies.settings.titleSource);
+				const conversion = convertMarkdown(
+					selectPublishContent(note, this.dependencies.settings.stripFrontmatter),
+					{
+						sourcePath: note.path,
+						spaceKey: destination.spaceKey,
+						pageTitles: new Map(),
+						resolveLink: (target, sourcePath) => this.dependencies.notes.resolveLink(target, sourcePath),
+					},
+				);
+				candidates.push({
+					...note,
+					title,
+					publication: readPublication(note.frontmatter, destination.id),
+					legacyPublication: readLegacyPublication(note.frontmatter),
+					images: [
+						...conversion.images,
+						...conversion.issues.map((issue) => ({ sourcePath: issue.target, resolvedPath: null as null })),
+					],
+				});
+				filesByPath.set(note.path, file);
+			} catch (error) {
+				if (isAbort(error, signal)) throw error;
+				failures.push({
+					type: 'failed',
+					title: file.path,
+					phase: 'preflight',
+					error: errorMessage(error),
+				});
+			}
+		}
+		return failures.length > 0 ? { failures } : { candidates, filesByPath };
+	}
+
+	private async buildPageTitles(
+		destinationId: string,
+		resolved: PreparedPage[],
+		signal: AbortSignal,
+	): Promise<Map<string, string>> {
+		signal.throwIfAborted();
+		const pageTitles = new Map<string, string>();
+		for (const published of await this.dependencies.notes.listPublished(destinationId)) {
+			pageTitles.set(published.path, published.title);
+		}
+		for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
+		return pageTitles;
+	}
+
+	private async rollbackCreatedPage(pageId: string): Promise<unknown | null> {
+		const cleanup = createCleanupSignal();
+		try {
+			await this.dependencies.repository.deletePage(pageId, cleanup.signal);
+			return null;
+		} catch (error) {
+			return error;
+		} finally {
+			cleanup.dispose();
+		}
+	}
+}
+
+export function createCleanupSignal(): CleanupSignal {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS);
+	return {
+		signal: controller.signal,
+		dispose: () => clearTimeout(timer),
+	};
+}
+
+function validateInput(
+	files: NoteFileRef[],
+	destination: Destination,
+	baseUrl: string,
+): Array<{ title: string | null; message: string }> {
+	const failures: Array<{ title: string | null; message: string }> = [];
+	if (!destination.id.trim() || !destination.spaceKey.trim() || !destination.parentPageId.trim()) {
+		failures.push({ title: null, message: 'Destination is incomplete.' });
+	}
+	try {
+		const url = new URL(normalizeBaseUrl(baseUrl));
+		if (!url.protocol || !url.host) throw new Error('invalid');
+	} catch {
+		failures.push({ title: null, message: 'Confluence base URL is invalid.' });
+	}
+	for (const file of files) {
+		if (file.extension.toLowerCase() !== 'md') {
+			failures.push({ title: file.path, message: `${file.path} is not a Markdown file.` });
+		}
+	}
+	return failures;
+}
+
+function resolveTitle(
+	basename: string,
+	frontmatter: Record<string, unknown>,
+	titleSource: 'frontmatter' | 'filename',
+): string {
+	const title = frontmatter.title;
+	return titleSource === 'frontmatter' && typeof title === 'string' && title.trim()
+		? title.trim()
+		: basename;
+}
+
+function pageOwnership(destination: Destination, sourcePath: string): PageOwnership {
+	return { schemaVersion: 1, destinationId: destination.id, sourcePath };
+}
+
+function resolutionFailure(title: string, error: unknown): Extract<ProgressEvent, { type: 'failed' }> {
+	return { type: 'failed', title, phase: 'page-resolution', error: errorMessage(error) };
+}
+
+function orphanedPageError(
+	page: ResolvedPage,
+	ownershipError: unknown,
+	cleanupError: unknown,
+	baseUrl: string,
+): string {
+	return [
+		`Ownership creation failed: ${errorMessage(ownershipError)}.`,
+		`Rollback failed: ${errorMessage(cleanupError)}.`,
+		`Orphan page ${page.id}: ${pageUrl(baseUrl, page.id, page.webui)}`,
+	].join(' ');
+}
+
+function pageUrl(baseUrl: string, pageId: string, webui: string | null): string {
+	const normalized = normalizeBaseUrl(baseUrl);
+	const base = new URL(normalized);
+	if (webui !== null) {
+		if (/^[a-z][a-z\d+.-]*:\/\//i.test(webui)) {
+			try {
+				const candidate = new URL(webui);
+				if (
+					candidate.origin === base.origin
+					&& candidate.username === ''
+					&& candidate.password === ''
+				) return candidate.toString();
+			} catch {
+				// Fall back to the stable page ID URL below.
+			}
+		} else if (!webui.startsWith('//')) {
+			const basePath = base.pathname.replace(/\/+$/, '');
+			const relativePath = webui.startsWith(`${basePath}/`)
+				? webui.slice(basePath.length)
+				: webui;
+			try {
+				const candidate = new URL(`${normalized}/${relativePath.replace(/^\/+/, '')}`);
+				const withinBasePath = basePath === ''
+					|| candidate.pathname === basePath
+					|| candidate.pathname.startsWith(`${basePath}/`);
+				if (candidate.origin === base.origin && withinBasePath) return candidate.toString();
+			} catch {
+				// Fall back to the stable page ID URL below.
+			}
+		}
+	}
+	return `${normalized}/pages/viewpage.action?pageId=${encodeURIComponent(pageId)}`;
+}
+
+export function mimeTypeForPath(path: string): string {
+	const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+	return ({
 		png: 'image/png',
 		jpg: 'image/jpeg',
 		jpeg: 'image/jpeg',
 		gif: 'image/gif',
 		svg: 'image/svg+xml',
 		webp: 'image/webp',
-	};
-	return map[ext.toLowerCase()] || 'application/octet-stream';
+	} as Record<string, string>)[extension] ?? 'application/octet-stream';
 }
 
-export class Publisher {
-	private client: ConfluenceClient;
-	private settings: ConfluencePublisherSettings;
-	private app: App;
+function isAbort(error: unknown, signal: AbortSignal): boolean {
+	return signal.aborted || (error instanceof DOMException && error.name === 'AbortError');
+}
 
-	constructor(app: App, settings: ConfluencePublisherSettings) {
-		this.app = app;
-		this.settings = settings;
-		this.client = new ConfluenceClient(
-			settings.confluenceUrl,
-			settings.authType,
-			settings.token,
-			settings.username,
-			settings.password,
-		);
-	}
-
-	async *publish(files: TFile[], spaceKey: string, parentPageId: string): AsyncGenerator<ProgressEvent> {
-		yield { type: 'start', total: files.length };
-
-		// --- Parse all files ---
-		const entries: PageEntry[] = [];
-		for (const file of files) {
-			const raw = await this.app.vault.cachedRead(file);
-			const { frontmatter, body } = this.parseFrontmatter(raw);
-			const title = this.resolveTitle(file, frontmatter);
-			const existingId = (frontmatter['confluence-page-id'] as string) || null;
-			entries.push({ file, title, frontmatter, body, confluenceId: existingId });
-		}
-
-		// --- Pass 1: Create or find pages ---
-		const titleToPath = new Map<string, string>();
-		for (let i = 0; i < entries.length; i++) {
-			const entry = entries[i];
-			try {
-				if (entry.confluenceId) {
-					// Already published — will update in pass 2
-					titleToPath.set(entry.title, entry.file.path);
-					yield { type: 'page_created', title: entry.title, index: i };
-					continue;
-				}
-
-				const existingId = await this.client.findPageByTitle(
-					spaceKey,
-					entry.title,
-				);
-
-				if (existingId) {
-					entry.confluenceId = existingId;
-				} else {
-					const page = await this.client.createPage(
-						spaceKey,
-						parentPageId,
-						entry.title,
-						'<p>Importing from Obsidian...</p>',
-					);
-					entry.confluenceId = page.id;
-				}
-
-				titleToPath.set(entry.title, entry.file.path);
-				yield { type: 'page_created', title: entry.title, index: i };
-			} catch (e) {
-				const msg = e instanceof Error ? e.message : String(e);
-				yield { type: 'error', title: entry.title, error: msg };
-				entry.confluenceId = null; // mark as failed
-			}
-		}
-
-		// Build mapping: file path -> confluence title (for wikilink resolution)
-		// Obsidian's getFirstLinkpathDest() already resolves aliases internally,
-		// so we only need the file path → title mapping here.
-		const publishedFiles = new Map<string, string>();
-		for (const entry of entries) {
-			if (entry.confluenceId) {
-				publishedFiles.set(entry.file.path, entry.title);
-			}
-		}
-
-		// --- Pass 2: Convert content, upload images, update pages ---
-		let succeeded = 0;
-		let failed = 0;
-		let skipped = 0;
-
-		for (let i = 0; i < entries.length; i++) {
-			const entry = entries[i];
-			if (!entry.confluenceId) {
-				skipped++;
-				continue;
-			}
-
-			try {
-				const conversion = convertMarkdown(entry.body, {
-					sourcePath: entry.file.path,
-					spaceKey,
-					pageTitles: publishedFiles,
-					resolveLink: (target, sourcePath) =>
-						this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path
-						?? null,
-				});
-				if (conversion.issues.length > 0) {
-					const targets = conversion.issues.map((issue) => issue.target).join(', ');
-					throw new Error(`Unresolved image attachments: ${targets}`);
-				}
-				const storageBody = conversion.storage;
-
-				// Upload images (skip already-uploaded ones)
-				const { uploaded } = await this.uploadImages(
-					entry.confluenceId,
-					conversion.images,
-				);
-				for (const filename of uploaded) {
-					yield { type: 'image_uploaded', filename };
-				}
-
-				// Get current version for update
-				const currentPage = await this.client.getPage(entry.confluenceId);
-				await this.client.updatePage(
-					entry.confluenceId,
-					entry.title,
-					storageBody,
-					currentPage.version.number,
-				);
-
-				// Write confluence-page-id back to frontmatter
-				const webui = currentPage._links?.webui
-					?? `/pages/viewpage.action?pageId=${entry.confluenceId}`;
-				await this.writeFrontmatterId(
-					entry.file,
-					entry.confluenceId,
-					webui,
-				);
-
-				succeeded++;
-				yield { type: 'page_updated', title: entry.title, index: i };
-			} catch (e) {
-				const msg = e instanceof Error ? e.message : String(e);
-				failed++;
-				yield { type: 'error', title: entry.title, error: msg };
-			}
-		}
-
-		yield { type: 'complete', succeeded, failed, skipped };
-	}
-
-	private parseFrontmatter(raw: string): {
-		frontmatter: Record<string, unknown>;
-		body: string;
-	} {
-		const match = raw.match(FRONTMATTER_RE);
-		if (!match) {
-			return { frontmatter: {}, body: raw };
-		}
-		try {
-			const fm = parseYaml(match[1]) || {};
-			const body = raw.slice(match[0].length);
-			return { frontmatter: fm as Record<string, unknown>, body };
-		} catch {
-			return { frontmatter: {}, body: raw };
-		}
-	}
-
-	private resolveTitle(
-		file: TFile,
-		frontmatter: Record<string, unknown>,
-	): string {
-		let title: string;
-		if (
-			this.settings.titleSource === 'frontmatter' &&
-			typeof frontmatter['title'] === 'string' &&
-			frontmatter['title'].trim()
-		) {
-			title = frontmatter['title'].trim();
-		} else {
-			title = file.basename;
-		}
-		return title;
-	}
-
-	private async uploadImages(
-		pageId: string,
-		images: EmbeddedImage[],
-	): Promise<{ uploaded: string[]; skipped: string[] }> {
-		const uploaded: string[] = [];
-		const skipped: string[] = [];
-
-		// Fetch existing attachments once to avoid redundant uploads
-		let existing: Set<string>;
-		try {
-			existing = await this.client.getAttachmentFilenames(pageId);
-		} catch {
-			existing = new Set();
-		}
-
-		for (const img of images) {
-			const file = this.app.vault.getAbstractFileByPath(img.resolvedPath);
-			if (!file || !(file instanceof TFile)) {
-				throw new Error(`Resolved attachment is not a file: ${img.resolvedPath}`);
-			}
-
-			if (existing.has(img.attachmentName)) {
-				console.log(`[confluence-publisher] Skipping already uploaded: ${img.attachmentName}`);
-				skipped.push(img.attachmentName);
-				continue;
-			}
-
-			try {
-				const data = await this.app.vault.readBinary(file);
-				const mimeType = getMimeType(file.extension);
-				await this.client.uploadAttachment(
-					pageId,
-					img.attachmentName,
-					data,
-					mimeType,
-				);
-				uploaded.push(img.attachmentName);
-			} catch (e) {
-				const message = e instanceof Error ? e.message : String(e);
-				throw new Error(
-					`Failed to upload attachment ${img.attachmentName}: ${message}`,
-				);
-			}
-		}
-		return { uploaded, skipped };
-	}
-
-	private async writeFrontmatterId(
-		file: TFile,
-		pageId: string,
-		webui: string,
-	): Promise<void> {
-		const raw = await this.app.vault.read(file);
-		const confluenceUrl = `${this.settings.confluenceUrl}${webui}`;
-
-		const match = raw.match(FRONTMATTER_RE);
-		if (match) {
-			try {
-				const fm = (parseYaml(match[1]) || {}) as Record<string, unknown>;
-				fm['confluence-page-id'] = pageId;
-				fm['confluence-url'] = confluenceUrl;
-				const newFm = `---\n${stringifyYaml(fm)}---\n`;
-				const newContent = newFm + raw.slice(match[0].length);
-				await this.app.vault.modify(file, newContent);
-			} catch {
-				// If YAML parsing fails, don't modify
-			}
-		} else {
-			// No frontmatter — prepend one
-			const fm = {
-				'confluence-page-id': pageId,
-				'confluence-url': confluenceUrl,
-			};
-			const newContent = `---\n${stringifyYaml(fm)}---\n${raw}`;
-			await this.app.vault.modify(file, newContent);
-		}
-	}
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
