@@ -261,6 +261,12 @@ function joinRequestUrl(baseUrl: URL, path: string): URL {
   const question = path.indexOf('?');
   const pathname = question === -1 ? path : path.slice(0, question);
   const search = question === -1 ? '' : path.slice(question);
+  if (/%(?:2f|5c)/i.test(pathname)) {
+    throw new TransportError(
+      'invalid-url',
+      'Confluence request pathname must not contain encoded path separators.',
+    );
+  }
   const contextPath = url.pathname.replace(/\/+$/, '');
   const requestPath = pathname.replace(/^\/+/, '');
   url.pathname = `${contextPath}/${requestPath}` || '/';

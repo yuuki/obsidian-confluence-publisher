@@ -120,6 +120,10 @@ describe('NodeHttpTransport', () => {
     '%2e%2e/rest/api/content',
     '/%2E%2E/rest/api/content',
     '.%2e/rest/api/content',
+    '..%2frest/api/content',
+    '..%2Frest/api/content',
+    '%2e%2e%5crest/api/content',
+    '%2E%2E%5Crest/api/content',
   ])('rejects a request path that escapes the base context before networking: %s', async (path) => {
     let contacts = 0;
     const server = await startServer((_req, res) => {
@@ -139,6 +143,18 @@ describe('NodeHttpTransport', () => {
 
     await expect(transport.requestJson({ method: 'GET', path: '../rest/api/content' }))
       .resolves.toEqual({ url: '/rest/api/content' });
+  });
+
+  it('preserves normal encoded paths and encoded separators in the query', async () => {
+    const server = await startServer((req, res) => json(res, { url: req.url }), '/confluence');
+    const transport = new NodeHttpTransport({ baseUrl: server.url, headers: {} });
+
+    await expect(transport.requestJson({
+      method: 'GET',
+      path: '/rest/api/content/My%20Page?next=..%2Frest%5Capi',
+    })).resolves.toEqual({
+      url: '/confluence/rest/api/content/My%20Page?next=..%2Frest%5Capi',
+    });
   });
 
   it('connects to an IPv6 loopback base URL', async () => {
