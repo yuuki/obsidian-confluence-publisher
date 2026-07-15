@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { verifyVersions } from './verify-version.mjs';
@@ -56,7 +56,7 @@ describe('verifyVersions', () => {
       lockfileRootPackageVersion: '0.1.0',
       manifestVersion: '0.1.0',
       tag: 'v0.1.0',
-    })).toThrow();
+    })).toThrow('Version mismatch: package=0.1.0, lockfile=0.1.1, lockfileRootPackage=0.1.0, manifest=0.1.0, tag=0.1.0');
   });
 
   it('rejects a lockfile root package version mismatch', () => {
@@ -66,7 +66,24 @@ describe('verifyVersions', () => {
       lockfileRootPackageVersion: '0.1.1',
       manifestVersion: '0.1.0',
       tag: 'v0.1.0',
-    })).toThrow();
+    })).toThrow('Version mismatch: package=0.1.0, lockfile=0.1.0, lockfileRootPackage=0.1.1, manifest=0.1.0, tag=0.1.0');
+  });
+
+  it('reports a version mismatch when the lockfile has no packages section', () => {
+    const packageLockUrl = new URL('../package-lock.json', import.meta.url);
+    const originalLockfile = readFileSync(packageLockUrl, 'utf8');
+    const { packages: _packages, ...lockfileWithoutPackages } = JSON.parse(originalLockfile);
+
+    writeFileSync(packageLockUrl, `${JSON.stringify(lockfileWithoutPackages, null, 2)}\n`);
+
+    try {
+      expect(() => execFileSync(process.execPath, [scriptPath], {
+        stdio: 'pipe',
+        env: { ...process.env, RELEASE_TAG: `v${currentVersion}` },
+      })).toThrow(`Version mismatch: package=${currentVersion}, lockfile=${currentVersion}, lockfileRootPackage=undefined, manifest=${currentVersion}, tag=${currentVersion}`);
+    } finally {
+      writeFileSync(packageLockUrl, originalLockfile);
+    }
   });
 
   it('reads repository versions and the release tag when run directly', () => {

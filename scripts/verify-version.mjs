@@ -36,7 +36,7 @@ function main() {
   verifyVersions({
     packageVersion: packageJson.version,
     lockfileVersion: packageLock.version,
-    lockfileRootPackageVersion: packageLock.packages['']?.version,
+    lockfileRootPackageVersion: packageLock.packages?.['']?.version,
     manifestVersion: manifest.version,
     tag: process.env.RELEASE_TAG,
   });
