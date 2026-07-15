@@ -24,7 +24,7 @@ function main() {
   verifyVersions({
     packageVersion: packageJson.version,
     manifestVersion: manifest.version,
-    tag: process.env.GITHUB_REF_NAME,
+    tag: process.env.RELEASE_TAG,
   });
   process.stdout.write(`Version ${packageJson.version} is consistent.\n`);
 }
