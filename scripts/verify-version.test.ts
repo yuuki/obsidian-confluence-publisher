@@ -13,6 +13,8 @@ describe('verifyVersions', () => {
   it('accepts matching package, manifest, and v-prefixed tag versions', () => {
     expect(() => verifyVersions({
       packageVersion: '0.1.0',
+      lockfileVersion: '0.1.0',
+      lockfileRootPackageVersion: '0.1.0',
       manifestVersion: '0.1.0',
       tag: 'v0.1.0',
     })).not.toThrow();
@@ -21,6 +23,8 @@ describe('verifyVersions', () => {
   it('uses the package version when no tag is provided', () => {
     expect(() => verifyVersions({
       packageVersion: '0.1.0',
+      lockfileVersion: '0.1.0',
+      lockfileRootPackageVersion: '0.1.0',
       manifestVersion: '0.1.0',
     })).not.toThrow();
   });
@@ -28,17 +32,41 @@ describe('verifyVersions', () => {
   it('rejects a manifest mismatch', () => {
     expect(() => verifyVersions({
       packageVersion: '0.1.0',
+      lockfileVersion: '0.1.0',
+      lockfileRootPackageVersion: '0.1.0',
       manifestVersion: '0.1.1',
       tag: 'v0.1.0',
-    })).toThrow('Version mismatch: package=0.1.0, manifest=0.1.1, tag=0.1.0');
+    })).toThrow('Version mismatch: package=0.1.0, lockfile=0.1.0, lockfileRootPackage=0.1.0, manifest=0.1.1, tag=0.1.0');
   });
 
   it('rejects a tag mismatch after removing one leading v', () => {
     expect(() => verifyVersions({
       packageVersion: '0.1.0',
+      lockfileVersion: '0.1.0',
+      lockfileRootPackageVersion: '0.1.0',
       manifestVersion: '0.1.0',
       tag: 'v0.2.0',
-    })).toThrow('Version mismatch: package=0.1.0, manifest=0.1.0, tag=0.2.0');
+    })).toThrow('Version mismatch: package=0.1.0, lockfile=0.1.0, lockfileRootPackage=0.1.0, manifest=0.1.0, tag=0.2.0');
+  });
+
+  it('rejects a lockfile top-level version mismatch', () => {
+    expect(() => verifyVersions({
+      packageVersion: '0.1.0',
+      lockfileVersion: '0.1.1',
+      lockfileRootPackageVersion: '0.1.0',
+      manifestVersion: '0.1.0',
+      tag: 'v0.1.0',
+    })).toThrow();
+  });
+
+  it('rejects a lockfile root package version mismatch', () => {
+    expect(() => verifyVersions({
+      packageVersion: '0.1.0',
+      lockfileVersion: '0.1.0',
+      lockfileRootPackageVersion: '0.1.1',
+      manifestVersion: '0.1.0',
+      tag: 'v0.1.0',
+    })).toThrow();
   });
 
   it('reads repository versions and the release tag when run directly', () => {
