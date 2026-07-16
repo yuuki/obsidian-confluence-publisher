@@ -1,9 +1,10 @@
 import { convertMarkdown } from './converter/storage-renderer';
 import {
 	normalizeBaseUrl,
-	isSameDestination,
+	isSamePublicationDestination,
 	type Destination,
 	type DestinationSnapshot,
+	type PublicationPlanResult,
 	type NoteCandidate,
 	type PageOwnership,
 	type PlannedPage,
@@ -15,7 +16,7 @@ import {
 	readLegacyPublication,
 	readPublication,
 } from './domain/publication-metadata';
-import { buildPublicationPlan } from './domain/publication-planner';
+import { buildPublicationPlan, validatePublicationPlanInput } from './domain/publication-planner';
 import type { ConfluencePublisherSettings } from './domain/settings';
 import {
 	resolveNoteTitle,
@@ -55,6 +56,11 @@ export interface CleanupSignal {
 	dispose(): void;
 }
 
+export interface PublishOptions {
+	mainPath?: string;
+	outgoingChildPaths?: ReadonlySet<string>;
+}
+
 interface PreparedPage {
 	file: NoteFileRef;
 	planned: PlannedPage;
@@ -69,6 +75,7 @@ export class Publisher {
 		files: NoteFileRef[],
 		destination: Destination,
 		signal: AbortSignal,
+		options: PublishOptions = {},
 	): AsyncGenerator<ProgressEvent> {
 		let succeeded = 0;
 		let failed = 0;
@@ -91,10 +98,38 @@ export class Publisher {
 				return;
 			}
 
+			const childPaths = options.outgoingChildPaths ?? new Set<string>();
+			const childCandidates = prepared.candidates.filter((candidate) => childPaths.has(candidate.path));
+			const preservedChildCandidates = prepared.candidates.filter((candidate) =>
+				!childPaths.has(candidate.path)
+				&& candidate.publication?.destinationParentPageId !== undefined
+				&& candidate.publication.parentPageId !== candidate.publication.destinationParentPageId,
+			);
+			const initialCandidates = prepared.candidates.filter((candidate) =>
+				!childPaths.has(candidate.path) && !preservedChildCandidates.includes(candidate),
+			);
+			if (childCandidates.length > 0 && (
+				options.mainPath === undefined
+				|| childPaths.has(options.mainPath)
+				|| !prepared.filesByPath.has(options.mainPath)
+			)) {
+				yield { type: 'failed', title: null, phase: 'preflight', error: 'Child-page publishing requires the selected current note.' };
+				yield completeEvent(files.length, 0);
+				return;
+			}
+			const childPreflight = validatePublicationPlanInput(
+				this.dependencies.settings.confluenceUrl, destination, childCandidates,
+			);
+			if (childPreflight.issues.length > 0) {
+				for (const issue of childPreflight.issues) yield { type: 'failed', title: issue.path, phase: 'preflight', error: issue.message };
+				yield completeEvent(files.length, 0);
+				return;
+			}
+
 			const plan = await buildPublicationPlan({
 				baseUrl: this.dependencies.settings.confluenceUrl,
 				destination,
-				notes: prepared.candidates,
+				notes: initialCandidates,
 				repository: this.dependencies.repository,
 				signal,
 			});
@@ -110,15 +145,29 @@ export class Publisher {
 				yield completeEvent(files.length, 0);
 				return;
 			}
+			for (const child of preservedChildCandidates) {
+				const childPlan = await this.buildChildPlan(
+					[child], destination, plan.snapshot, child.publication!.parentPageId, signal,
+				);
+				if (!childPlan.ok) {
+					for (const issue of childPlan.issues) yield { type: 'failed', title: issue.path, phase: 'preflight', error: issue.message };
+					yield completeEvent(files.length, 0);
+					return;
+				}
+				plan.pages.push(...childPlan.pages);
+			}
 
 			const pageTitles = await this.loadPublishedPageTitles(
 				plan.snapshot,
-				new Set(plan.pages.map((page) => page.note.path)),
+				new Set(prepared.candidates.map((candidate) => candidate.path)),
 				signal,
 			);
-			yield { type: 'planned', total: plan.pages.length };
+			yield { type: 'planned', total: prepared.candidates.length };
 			const resolved: PreparedPage[] = [];
-			for (const planned of plan.pages) {
+			const plannedPages = [...plan.pages];
+			let childrenPlanned = false;
+			for (let index = 0; index < plannedPages.length; index++) {
+				const planned = plannedPages[index];
 				signal.throwIfAborted();
 				const file = prepared.filesByPath.get(planned.note.path);
 				if (file === undefined) throw new Error(`Prepared note is missing: ${planned.note.path}`);
@@ -128,7 +177,7 @@ export class Publisher {
 					try {
 						page = await this.dependencies.repository.createPage(
 							plan.snapshot.spaceKey,
-							plan.snapshot.parentPageId,
+							planned.parentPageId ?? plan.snapshot.parentPageId,
 							planned.note.title,
 							PLACEHOLDER_BODY,
 							signal,
@@ -165,6 +214,16 @@ export class Publisher {
 					}
 					yield { type: 'page-created', title: planned.note.title };
 					resolved.push({ file, planned, pageId: page.id, webui: page.webui });
+					if (planned.note.path === options.mainPath && !childrenPlanned) {
+						const childPlan = await this.buildChildPlan(childCandidates, destination, plan.snapshot, page.id, signal);
+						if (!childPlan.ok) {
+							for (const issue of childPlan.issues) yield { type: 'failed', title: issue.path, phase: 'preflight', error: issue.message };
+							yield completeEvent(files.length, succeeded);
+							return;
+						}
+						plannedPages.push(...childPlan.pages);
+						childrenPlanned = true;
+					}
 					continue;
 				}
 
@@ -182,6 +241,16 @@ export class Publisher {
 					}
 				}
 				resolved.push({ file, planned, pageId, webui: null });
+				if (planned.note.path === options.mainPath && !childrenPlanned) {
+					const childPlan = await this.buildChildPlan(childCandidates, destination, plan.snapshot, pageId, signal);
+					if (!childPlan.ok) {
+						for (const issue of childPlan.issues) yield { type: 'failed', title: issue.path, phase: 'preflight', error: issue.message };
+						yield completeEvent(files.length, succeeded);
+						return;
+					}
+					plannedPages.push(...childPlan.pages);
+					childrenPlanned = true;
+				}
 			}
 
 			for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
@@ -234,6 +303,8 @@ export class Publisher {
 					);
 					const record: PublicationRecord = {
 						...plan.snapshot,
+						parentPageId: item.planned.parentPageId ?? plan.snapshot.parentPageId,
+						destinationParentPageId: plan.snapshot.parentPageId,
 						pageId: item.pageId,
 						pageUrl: pageUrl(plan.snapshot.baseUrl, item.pageId, current.webui ?? item.webui),
 					};
@@ -262,6 +333,24 @@ export class Publisher {
 			yield { type: 'failed', title: null, phase: 'preflight', error: errorMessage(error) };
 			yield completeEvent(files.length, succeeded);
 		}
+	}
+
+	private async buildChildPlan(
+		children: NoteCandidate[],
+		destination: Destination,
+		snapshot: DestinationSnapshot,
+		parentPageId: string,
+		signal: AbortSignal,
+	): Promise<PublicationPlanResult> {
+		if (children.length === 0) return { ok: true, snapshot, pages: [] };
+		return buildPublicationPlan({
+			baseUrl: snapshot.baseUrl,
+			destination,
+			notes: children,
+			repository: this.dependencies.repository,
+			signal,
+			parentPageId,
+		});
 	}
 
 	private async prepareCandidates(
@@ -326,11 +415,11 @@ export class Publisher {
 		)) {
 			if (
 				selectedPaths.has(published.path)
-				|| !isSameDestination(published.record, destination)
+				|| !isSamePublicationDestination(published.record, destination)
 			) continue;
 			signal.throwIfAborted();
 			const page = await this.dependencies.repository.getPage(published.record.pageId, signal);
-			if (page !== null && isPublishedPage(published.path, published.record.pageId, page, destination)) {
+			if (page !== null && isPublishedPage(published.path, published.record, page, destination)) {
 				pageTitles.set(published.path, page.title);
 			}
 		}
@@ -353,13 +442,13 @@ export class Publisher {
 
 function isPublishedPage(
 	sourcePath: string,
-	pageId: string,
+	record: PublicationRecord,
 	page: ResolvedPage,
 	destination: DestinationSnapshot,
 ): boolean {
-	return page.id === pageId
+	return page.id === record.pageId
 		&& page.spaceKey === destination.spaceKey
-		&& page.parentPageId === destination.parentPageId
+		&& page.parentPageId === record.parentPageId
 		&& page.ownership?.schemaVersion === 1
 		&& page.ownership.destinationId === destination.destinationId
 		&& page.ownership.sourcePath === sourcePath;

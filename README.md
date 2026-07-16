@@ -75,7 +75,7 @@ The Command Palette provides three commands:
 
 | Command | Description |
 |---|---|
-| **Publish selected notes to Confluence** | Select Markdown notes from the current note, outgoing links, backlinks, or all notes, then choose a destination. |
+| **Publish selected notes to Confluence** | Select Markdown notes from the current note, outgoing links, or backlinks, then choose a destination. When the current note and outgoing links are selected, the outgoing links can be published as child pages of the current note. |
 | **Publish current note to Confluence** | Publish the active Markdown note to a selected destination. The command is unavailable for non-Markdown files. |
 | **Update already published notes** | Choose a destination first, then update only notes recorded for that destination. Notes with validated legacy metadata are also migration candidates. |
 
@@ -132,7 +132,7 @@ Wikilinks resolve only against publication records for the selected destination.
 
 ## Limitations
 
-- All pages are direct children of the configured parent; note folders do not create a Confluence hierarchy.
+- Normal publishes create direct children of the configured parent. Selected outgoing links can instead be created as direct children of the selected current note; note folders do not create a Confluence hierarchy.
 - Removing a note does not delete its Confluence page or attachments.
 - Old basename-only image attachments are retained.
 - Note embeds are links, not transclusions.

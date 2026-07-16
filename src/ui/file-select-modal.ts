@@ -154,6 +154,10 @@ const STYLES = `
   color: var(--text-faint);
   font-size: 0.9em;
 }
+
+.confluence-child-pages-option {
+  margin: 0 0 12px;
+}
 `;
 
 interface Section {
@@ -162,16 +166,23 @@ interface Section {
   collapsedByDefault: boolean;
 }
 
+export interface FileSelection {
+	files: TFile[];
+	mainFile: TFile | null;
+	outgoingChildPaths: ReadonlySet<string>;
+}
+
 export class FileSelectModal extends Modal {
   private selectedFiles: Set<TFile> = new Set();
-  private onSubmit: (files: TFile[]) => void;
+  private onSubmit: (selection: FileSelection) => void;
   private searchInput: HTMLInputElement;
   private listContainer: HTMLElement;
   private submitBtn: HTMLButtonElement;
   private styleEl: HTMLStyleElement;
   private collapsedSections: Set<string> = new Set();
+  private childPagesOption: HTMLInputElement;
 
-  constructor(app: App, onSubmit: (files: TFile[]) => void) {
+  constructor(app: App, onSubmit: (selection: FileSelection) => void) {
     super(app);
     this.onSubmit = onSubmit;
   }
@@ -211,7 +222,15 @@ export class FileSelectModal extends Modal {
       const files = Array.from(this.selectedFiles).filter(isMarkdownFile);
       if (files.length === 0) return;
       this.close();
-      this.onSubmit(files);
+			const mainFile = this.app.workspace.getActiveFile();
+			const outgoing = this.getRelatedFiles(mainFile).outgoing;
+      this.onSubmit({
+				files,
+				mainFile: mainFile instanceof TFile ? mainFile : null,
+				outgoingChildPaths: this.childPagesOption.checked
+					? new Set(outgoing.filter((file) => this.selectedFiles.has(file)).map((file) => file.path))
+					: new Set(),
+			});
     });
 
     // Pre-select the active file
@@ -220,8 +239,10 @@ export class FileSelectModal extends Modal {
       this.selectedFiles.add(activeFile);
     }
 
-    // "All Notes" starts collapsed
-    this.collapsedSections.add('All Notes');
+
+		const option = contentEl.createEl('label', { cls: 'confluence-child-pages-option' });
+		this.childPagesOption = option.createEl('input', { type: 'checkbox' });
+		option.appendText(' Publish selected outgoing links as child pages of the current note');
 
     this.renderList();
 
@@ -311,20 +332,6 @@ export class FileSelectModal extends Modal {
       });
     }
 
-    // 4. All Notes (excludes files already shown)
-    const allMarkdown = this.app.vault
-      .getMarkdownFiles()
-      .filter((f) => !shown.has(f.path))
-      .sort((a, b) => a.basename.localeCompare(b.basename));
-
-    if (allMarkdown.length > 0) {
-      sections.push({
-        label: 'All Notes',
-        files: allMarkdown,
-        collapsedByDefault: true,
-      });
-    }
-
     // Render each section, applying the search filter
     let totalVisible = 0;
     for (const section of sections) {
@@ -350,6 +357,7 @@ export class FileSelectModal extends Modal {
     }
 
     this.updateSubmitButton();
+		this.updateChildPagesOption(activeFile, outgoing);
   }
 
   /**
@@ -477,6 +485,14 @@ export class FileSelectModal extends Modal {
     this.submitBtn.textContent = `Publish (${count} file${count !== 1 ? 's' : ''})`;
     this.submitBtn.disabled = count === 0;
   }
+
+	private updateChildPagesOption(activeFile: TFile | null, outgoing: TFile[]): void {
+		const eligible = activeFile instanceof TFile
+			&& this.selectedFiles.has(activeFile)
+			&& outgoing.some((file) => this.selectedFiles.has(file));
+		this.childPagesOption.disabled = !eligible;
+		if (!eligible) this.childPagesOption.checked = false;
+	}
 
   onClose(): void {
     this.contentEl.empty();

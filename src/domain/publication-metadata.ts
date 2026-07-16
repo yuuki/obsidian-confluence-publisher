@@ -12,6 +12,9 @@ export function readPublication(
 	if (!isRecord(value)) return null;
 	const required = ['base-url', 'space-key', 'parent-page-id', 'page-id', 'page-url'] as const;
 	if (required.some((key) => typeof value[key] !== 'string' || value[key].length === 0)) return null;
+	const destinationParentPageId = value['destination-parent-page-id'];
+	if (destinationParentPageId !== undefined
+		&& (typeof destinationParentPageId !== 'string' || destinationParentPageId.length === 0)) return null;
 	return {
 		destinationId,
 		baseUrl: value['base-url'] as string,
@@ -19,6 +22,7 @@ export function readPublication(
 		parentPageId: value['parent-page-id'] as string,
 		pageId: value['page-id'] as string,
 		pageUrl: value['page-url'] as string,
+		...(destinationParentPageId === undefined ? {} : { destinationParentPageId }),
 	};
 }
 
@@ -56,6 +60,9 @@ export function writePublication(
 		'parent-page-id': record.parentPageId,
 		'page-id': record.pageId,
 		'page-url': record.pageUrl,
+		...(record.destinationParentPageId === undefined
+			? {}
+			: { 'destination-parent-page-id': record.destinationParentPageId }),
 	};
 	const next: Record<string, unknown> = { ...frontmatter, [PUBLICATIONS_KEY]: current };
 	delete next['confluence-page-id'];

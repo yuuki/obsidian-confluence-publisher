@@ -8,7 +8,7 @@ import {
 } from './settings';
 import { loadMigratedSettings } from './domain/settings';
 import { validateDestination, validatePublishFiles } from './domain/validation';
-import { FileSelectModal } from './ui/file-select-modal';
+import { FileSelectModal, type FileSelection } from './ui/file-select-modal';
 import { DestinationSelectModal } from './ui/destination-select-modal';
 import { ProgressModal } from './ui/progress-modal';
 import { Publisher } from './publisher';
@@ -28,8 +28,8 @@ export default class ConfluencePublisherPlugin extends Plugin {
 			id: 'publish-selected',
 			name: 'Publish selected notes to Confluence',
 			callback: () => {
-				new FileSelectModal(this.app, (files) =>
-					this.selectDestinationAndPublish(files),
+				new FileSelectModal(this.app, (selection) =>
+					this.selectDestinationAndPublish(selection),
 				).open();
 			},
 		});
@@ -40,7 +40,7 @@ export default class ConfluencePublisherPlugin extends Plugin {
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (file === null || file.extension.toLowerCase() !== 'md') return false;
-				if (!checking) this.selectDestinationAndPublish([file]);
+				if (!checking) this.selectDestinationAndPublish({ files: [file], mainFile: file, outgoingChildPaths: new Set() });
 				return true;
 			},
 		});
@@ -63,12 +63,13 @@ export default class ConfluencePublisherPlugin extends Plugin {
 		);
 	}
 
-	private selectDestinationAndPublish(files: TFile[]): void {
+	private selectDestinationAndPublish(selection: FileSelection): void {
+		const { files } = selection;
 		if (files.length === 0) {
 			new Notice('No files selected.');
 			return;
 		}
-		this.selectDestination((destination) => this.runPublish(files, destination));
+		this.selectDestination((destination) => this.runPublish(files, destination, selection));
 	}
 
 	private selectDestination(onChoose: (destination: ConfluenceDestination) => void): void {
@@ -107,6 +108,7 @@ export default class ConfluencePublisherPlugin extends Plugin {
 	private async runPublish(
 		files: NoteFileRef[],
 		destination: ConfluenceDestination,
+		selection?: FileSelection,
 	): Promise<void> {
 		if (this.activePublish !== null) {
 			new Notice('A Confluence publish is already running.');
@@ -136,7 +138,10 @@ export default class ConfluencePublisherPlugin extends Plugin {
 
 		try {
 			const publisher = this.createPublisher();
-			for await (const event of publisher.publish(files, destination, controller.signal)) {
+			for await (const event of publisher.publish(files, destination, controller.signal, {
+				mainPath: selection?.mainFile?.path,
+				outgoingChildPaths: selection?.outgoingChildPaths,
+			})) {
 				progressModal.handleEvent(event);
 			}
 		} catch (error) {
