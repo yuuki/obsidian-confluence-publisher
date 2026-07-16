@@ -108,9 +108,10 @@ describe('verifyVersions', () => {
   });
 
   it('fails direct execution when the release tag is inconsistent', () => {
+    const inconsistentVersion = `${currentVersion}.1`;
     expect(() => execFileSync(process.execPath, [scriptPath], {
       stdio: 'pipe',
-      env: { ...process.env, RELEASE_TAG: 'v0.2.0' },
+      env: { ...process.env, RELEASE_TAG: `v${inconsistentVersion}` },
     })).toThrow();
   });
 });
