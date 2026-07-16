@@ -76,6 +76,20 @@ describe('publication metadata', () => {
 		});
 	});
 
+	it('preserves the configured destination parent for a page published beneath another note', () => {
+		const childRecord = { ...record, parentPageId: 'main-page', destinationParentPageId: '42' };
+
+		const next = writePublication({}, childRecord);
+
+		expect(next[PUBLICATIONS_KEY]).toEqual({
+			'dest-1': expect.objectContaining({
+				'parent-page-id': 'main-page',
+				'destination-parent-page-id': '42',
+			}),
+		});
+		expect(readPublication(next, 'dest-1')).toEqual(childRecord);
+	});
+
 	it('replaces only the target publication without mutating a sibling or the input', () => {
 		const sibling = {
 			'base-url': 'https://sibling.test',

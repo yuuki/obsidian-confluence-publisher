@@ -464,6 +464,10 @@ var STYLES = `
   color: var(--text-faint);
   font-size: 0.9em;
 }
+
+.confluence-child-pages-option {
+  margin: 0 0 12px;
+}
 `;
 var FileSelectModal = class extends import_obsidian2.Modal {
   constructor(app, onSubmit) {
@@ -497,13 +501,21 @@ var FileSelectModal = class extends import_obsidian2.Modal {
       const files = Array.from(this.selectedFiles).filter(isMarkdownFile);
       if (files.length === 0) return;
       this.close();
-      this.onSubmit(files);
+      const mainFile = this.app.workspace.getActiveFile();
+      const outgoing = this.getRelatedFiles(mainFile).outgoing;
+      this.onSubmit({
+        files,
+        mainFile: mainFile instanceof import_obsidian2.TFile ? mainFile : null,
+        outgoingChildPaths: this.childPagesOption.checked ? new Set(outgoing.filter((file) => this.selectedFiles.has(file)).map((file) => file.path)) : /* @__PURE__ */ new Set()
+      });
     });
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && isMarkdownFile(activeFile)) {
       this.selectedFiles.add(activeFile);
     }
-    this.collapsedSections.add("All Notes");
+    const option = contentEl.createEl("label", { cls: "confluence-child-pages-option" });
+    this.childPagesOption = option.createEl("input", { type: "checkbox" });
+    option.appendText(" Publish selected outgoing links as child pages of the current note");
     this.renderList();
     this.searchInput.focus();
   }
@@ -570,14 +582,6 @@ var FileSelectModal = class extends import_obsidian2.Modal {
         collapsedByDefault: false
       });
     }
-    const allMarkdown = this.app.vault.getMarkdownFiles().filter((f) => !shown.has(f.path)).sort((a, b) => a.basename.localeCompare(b.basename));
-    if (allMarkdown.length > 0) {
-      sections.push({
-        label: "All Notes",
-        files: allMarkdown,
-        collapsedByDefault: true
-      });
-    }
     let totalVisible = 0;
     for (const section of sections) {
       const filtered = query ? section.files.filter(
@@ -594,6 +598,7 @@ var FileSelectModal = class extends import_obsidian2.Modal {
       });
     }
     this.updateSubmitButton();
+    this.updateChildPagesOption(activeFile, outgoing);
   }
   /**
    * Render a single collapsible section with a header checkbox for bulk
@@ -684,6 +689,11 @@ var FileSelectModal = class extends import_obsidian2.Modal {
     const count = this.selectedFiles.size;
     this.submitBtn.textContent = `Publish (${count} file${count !== 1 ? "s" : ""})`;
     this.submitBtn.disabled = count === 0;
+  }
+  updateChildPagesOption(activeFile, outgoing) {
+    const eligible = activeFile instanceof import_obsidian2.TFile && this.selectedFiles.has(activeFile) && outgoing.some((file) => this.selectedFiles.has(file));
+    this.childPagesOption.disabled = !eligible;
+    if (!eligible) this.childPagesOption.checked = false;
   }
   onClose() {
     this.contentEl.empty();
@@ -3466,6 +3476,10 @@ function destinationSnapshot(baseUrl, destination) {
 function isSameDestination(left, right) {
   return left.destinationId === right.destinationId && normalizeBaseUrl(left.baseUrl) === normalizeBaseUrl(right.baseUrl) && left.spaceKey === right.spaceKey && left.parentPageId === right.parentPageId;
 }
+function isSamePublicationDestination(record, destination) {
+  var _a;
+  return record.destinationId === destination.destinationId && normalizeBaseUrl(record.baseUrl) === normalizeBaseUrl(destination.baseUrl) && record.spaceKey === destination.spaceKey && ((_a = record.destinationParentPageId) != null ? _a : record.parentPageId) === destination.parentPageId;
+}
 
 // src/domain/publication-metadata.ts
 var PUBLICATIONS_KEY = "confluence-publications";
@@ -3476,13 +3490,16 @@ function readPublication(frontmatter, destinationId) {
   if (!isRecord3(value)) return null;
   const required = ["base-url", "space-key", "parent-page-id", "page-id", "page-url"];
   if (required.some((key) => typeof value[key] !== "string" || value[key].length === 0)) return null;
+  const destinationParentPageId = value["destination-parent-page-id"];
+  if (destinationParentPageId !== void 0 && (typeof destinationParentPageId !== "string" || destinationParentPageId.length === 0)) return null;
   return {
     destinationId,
     baseUrl: value["base-url"],
     spaceKey: value["space-key"],
     parentPageId: value["parent-page-id"],
     pageId: value["page-id"],
-    pageUrl: value["page-url"]
+    pageUrl: value["page-url"],
+    ...destinationParentPageId === void 0 ? {} : { destinationParentPageId }
   };
 }
 function readLegacyPublication(frontmatter) {
@@ -3498,7 +3515,8 @@ function writePublication(frontmatter, record) {
     "space-key": record.spaceKey,
     "parent-page-id": record.parentPageId,
     "page-id": record.pageId,
-    "page-url": record.pageUrl
+    "page-url": record.pageUrl,
+    ...record.destinationParentPageId === void 0 ? {} : { "destination-parent-page-id": record.destinationParentPageId }
   };
   const next = { ...frontmatter, [PUBLICATIONS_KEY]: current };
   delete next["confluence-page-id"];
@@ -3511,18 +3529,23 @@ function isRecord3(value) {
 
 // src/domain/publication-planner.ts
 async function buildPublicationPlan(input) {
-  const snapshot = destinationSnapshot(input.baseUrl, input.destination);
-  const localIssues = validateLocalInput(snapshot, input.notes);
+  var _a;
+  const { snapshot, issues: localIssues } = validatePublicationPlanInput(input.baseUrl, input.destination, input.notes);
+  const parentPageId = (_a = input.parentPageId) != null ? _a : snapshot.parentPageId;
   if (localIssues.length > 0) return { ok: false, issues: localIssues };
   const pages = [];
   const remoteIssues = [];
   for (const note of input.notes) {
     input.signal.throwIfAborted();
-    const resolution = await resolveNote(snapshot, note, input.repository, input.signal);
+    const resolution = await resolveNote(snapshot, parentPageId, note, input.repository, input.signal);
     if ("issue" in resolution) remoteIssues.push(resolution.issue);
     else pages.push(resolution.page);
   }
   return remoteIssues.length > 0 ? { ok: false, issues: remoteIssues } : { ok: true, snapshot, pages };
+}
+function validatePublicationPlanInput(baseUrl, destination, notes) {
+  const snapshot = destinationSnapshot(baseUrl, destination);
+  return { snapshot, issues: validateLocalInput(snapshot, notes) };
 }
 function validateLocalInput(snapshot, notes) {
   var _a;
@@ -3554,7 +3577,7 @@ function validateLocalInput(snapshot, notes) {
         });
       }
     }
-    if (note.publication !== null && !isSameDestination(note.publication, snapshot)) {
+    if (note.publication !== null && !isSamePublicationDestination(note.publication, snapshot)) {
       issues.push({
         code: "destination-mismatch",
         path: note.path,
@@ -3606,14 +3629,14 @@ function isUrlWithinBase(pageUrl2, baseUrl) {
     return false;
   }
 }
-async function resolveNote(snapshot, note, repository, signal) {
+async function resolveNote(snapshot, parentPageId, note, repository, signal) {
   var _a, _b, _c, _d;
   const isLegacy = note.publication === null && note.legacyPublication !== null;
   const savedPageId = (_d = (_c = (_a = note.publication) == null ? void 0 : _a.pageId) != null ? _c : (_b = note.legacyPublication) == null ? void 0 : _b.pageId) != null ? _d : null;
   if (savedPageId !== null) {
     const savedPage = await repository.getPage(savedPageId, signal);
     signal.throwIfAborted();
-    if (savedPage !== null) return resolveSavedPage(snapshot, note, savedPage, isLegacy);
+    if (savedPage !== null) return resolveSavedPage(snapshot, parentPageId, note, savedPage, isLegacy);
   }
   signal.throwIfAborted();
   const candidates = await repository.findPagesByTitle(snapshot.spaceKey, note.title, signal);
@@ -3622,6 +3645,7 @@ async function resolveNote(snapshot, note, repository, signal) {
     return {
       page: {
         note,
+        ...parentPageId === snapshot.parentPageId ? {} : { parentPageId },
         pageId: null,
         operation: "create",
         migrateLegacy: isLegacy,
@@ -3630,7 +3654,7 @@ async function resolveNote(snapshot, note, repository, signal) {
     };
   }
   const candidate = candidates[0];
-  if (candidates.length !== 1 || !isExactOwnedPage(candidate, snapshot, note.path)) {
+  if (candidates.length !== 1 || !isExactOwnedPage(candidate, snapshot, parentPageId, note.path)) {
     return {
       issue: {
         code: "ambiguous-page",
@@ -3642,6 +3666,7 @@ async function resolveNote(snapshot, note, repository, signal) {
   return {
     page: {
       note,
+      ...parentPageId === snapshot.parentPageId ? {} : { parentPageId },
       pageId: candidate.id,
       operation: "update",
       migrateLegacy: isLegacy,
@@ -3649,8 +3674,8 @@ async function resolveNote(snapshot, note, repository, signal) {
     }
   };
 }
-function resolveSavedPage(snapshot, note, page, isLegacy) {
-  const exactLocation = page.spaceKey === snapshot.spaceKey && page.parentPageId === snapshot.parentPageId;
+function resolveSavedPage(snapshot, parentPageId, note, page, isLegacy) {
+  const exactLocation = page.spaceKey === snapshot.spaceKey && page.parentPageId === parentPageId;
   const exactOwnership = isExpectedOwnership(page.ownership, snapshot.destinationId, note.path);
   const acceptableLegacyOwnership = isLegacy && page.ownership === null;
   if (!exactLocation || !exactOwnership && !acceptableLegacyOwnership) {
@@ -3665,6 +3690,7 @@ function resolveSavedPage(snapshot, note, page, isLegacy) {
   return {
     page: {
       note,
+      ...parentPageId === snapshot.parentPageId ? {} : { parentPageId },
       pageId: page.id,
       operation: "update",
       migrateLegacy: isLegacy,
@@ -3672,8 +3698,8 @@ function resolveSavedPage(snapshot, note, page, isLegacy) {
     }
   };
 }
-function isExactOwnedPage(page, snapshot, sourcePath) {
-  return page.spaceKey === snapshot.spaceKey && page.parentPageId === snapshot.parentPageId && isExpectedOwnership(page.ownership, snapshot.destinationId, sourcePath);
+function isExactOwnedPage(page, snapshot, parentPageId, sourcePath) {
+  return page.spaceKey === snapshot.spaceKey && page.parentPageId === parentPageId && isExpectedOwnership(page.ownership, snapshot.destinationId, sourcePath);
 }
 function isExpectedOwnership(ownership, destinationId, sourcePath) {
   return (ownership == null ? void 0 : ownership.schemaVersion) === 1 && ownership.destinationId === destinationId && ownership.sourcePath === sourcePath;
@@ -3794,8 +3820,8 @@ var Publisher = class {
   constructor(dependencies) {
     this.dependencies = dependencies;
   }
-  async *publish(files, destination, signal) {
-    var _a;
+  async *publish(files, destination, signal, options2 = {}) {
+    var _a, _b, _c, _d;
     let succeeded = 0;
     let failed = 0;
     try {
@@ -3814,10 +3840,36 @@ var Publisher = class {
         yield completeEvent(files.length, 0);
         return;
       }
+      const childPaths = (_a = options2.outgoingChildPaths) != null ? _a : /* @__PURE__ */ new Set();
+      const childCandidates = prepared.candidates.filter((candidate) => childPaths.has(candidate.path));
+      const preservedChildCandidates = prepared.candidates.filter(
+        (candidate) => {
+          var _a2;
+          return !childPaths.has(candidate.path) && ((_a2 = candidate.publication) == null ? void 0 : _a2.destinationParentPageId) !== void 0 && candidate.publication.parentPageId !== candidate.publication.destinationParentPageId;
+        }
+      );
+      const initialCandidates = prepared.candidates.filter(
+        (candidate) => !childPaths.has(candidate.path) && !preservedChildCandidates.includes(candidate)
+      );
+      if (childCandidates.length > 0 && (options2.mainPath === void 0 || childPaths.has(options2.mainPath) || !prepared.filesByPath.has(options2.mainPath))) {
+        yield { type: "failed", title: null, phase: "preflight", error: "Child-page publishing requires the selected current note." };
+        yield completeEvent(files.length, 0);
+        return;
+      }
+      const childPreflight = validatePublicationPlanInput(
+        this.dependencies.settings.confluenceUrl,
+        destination,
+        childCandidates
+      );
+      if (childPreflight.issues.length > 0) {
+        for (const issue of childPreflight.issues) yield { type: "failed", title: issue.path, phase: "preflight", error: issue.message };
+        yield completeEvent(files.length, 0);
+        return;
+      }
       const plan = await buildPublicationPlan({
         baseUrl: this.dependencies.settings.confluenceUrl,
         destination,
-        notes: prepared.candidates,
+        notes: initialCandidates,
         repository: this.dependencies.repository,
         signal
       });
@@ -3833,14 +3885,32 @@ var Publisher = class {
         yield completeEvent(files.length, 0);
         return;
       }
+      for (const child of preservedChildCandidates) {
+        const childPlan = await this.buildChildPlan(
+          [child],
+          destination,
+          plan.snapshot,
+          child.publication.parentPageId,
+          signal
+        );
+        if (!childPlan.ok) {
+          for (const issue of childPlan.issues) yield { type: "failed", title: issue.path, phase: "preflight", error: issue.message };
+          yield completeEvent(files.length, 0);
+          return;
+        }
+        plan.pages.push(...childPlan.pages);
+      }
       const pageTitles = await this.loadPublishedPageTitles(
         plan.snapshot,
-        new Set(plan.pages.map((page) => page.note.path)),
+        new Set(prepared.candidates.map((candidate) => candidate.path)),
         signal
       );
-      yield { type: "planned", total: plan.pages.length };
+      yield { type: "planned", total: prepared.candidates.length };
       const resolved = [];
-      for (const planned of plan.pages) {
+      const plannedPages = [...plan.pages];
+      let childrenPlanned = false;
+      for (let index = 0; index < plannedPages.length; index++) {
+        const planned = plannedPages[index];
         signal.throwIfAborted();
         const file = prepared.filesByPath.get(planned.note.path);
         if (file === void 0) throw new Error(`Prepared note is missing: ${planned.note.path}`);
@@ -3850,7 +3920,7 @@ var Publisher = class {
           try {
             page = await this.dependencies.repository.createPage(
               plan.snapshot.spaceKey,
-              plan.snapshot.parentPageId,
+              (_b = planned.parentPageId) != null ? _b : plan.snapshot.parentPageId,
               planned.note.title,
               PLACEHOLDER_BODY,
               signal
@@ -3886,6 +3956,16 @@ var Publisher = class {
           }
           yield { type: "page-created", title: planned.note.title };
           resolved.push({ file, planned, pageId: page.id, webui: page.webui });
+          if (planned.note.path === options2.mainPath && !childrenPlanned) {
+            const childPlan = await this.buildChildPlan(childCandidates, destination, plan.snapshot, page.id, signal);
+            if (!childPlan.ok) {
+              for (const issue of childPlan.issues) yield { type: "failed", title: issue.path, phase: "preflight", error: issue.message };
+              yield completeEvent(files.length, succeeded);
+              return;
+            }
+            plannedPages.push(...childPlan.pages);
+            childrenPlanned = true;
+          }
           continue;
         }
         const pageId = planned.pageId;
@@ -3902,6 +3982,16 @@ var Publisher = class {
           }
         }
         resolved.push({ file, planned, pageId, webui: null });
+        if (planned.note.path === options2.mainPath && !childrenPlanned) {
+          const childPlan = await this.buildChildPlan(childCandidates, destination, plan.snapshot, pageId, signal);
+          if (!childPlan.ok) {
+            for (const issue of childPlan.issues) yield { type: "failed", title: issue.path, phase: "preflight", error: issue.message };
+            yield completeEvent(files.length, succeeded);
+            return;
+          }
+          plannedPages.push(...childPlan.pages);
+          childrenPlanned = true;
+        }
       }
       for (const item of resolved) pageTitles.set(item.planned.note.path, item.planned.note.title);
       for (const item of resolved) {
@@ -3950,8 +4040,10 @@ var Publisher = class {
           );
           const record = {
             ...plan.snapshot,
+            parentPageId: (_c = item.planned.parentPageId) != null ? _c : plan.snapshot.parentPageId,
+            destinationParentPageId: plan.snapshot.parentPageId,
             pageId: item.pageId,
-            pageUrl: pageUrl(plan.snapshot.baseUrl, item.pageId, (_a = current.webui) != null ? _a : item.webui)
+            pageUrl: pageUrl(plan.snapshot.baseUrl, item.pageId, (_d = current.webui) != null ? _d : item.webui)
           };
           await this.dependencies.notes.writePublication(item.file, record);
           succeeded++;
@@ -3977,6 +4069,17 @@ var Publisher = class {
       yield { type: "failed", title: null, phase: "preflight", error: errorMessage(error) };
       yield completeEvent(files.length, succeeded);
     }
+  }
+  async buildChildPlan(children, destination, snapshot, parentPageId, signal) {
+    if (children.length === 0) return { ok: true, snapshot, pages: [] };
+    return buildPublicationPlan({
+      baseUrl: snapshot.baseUrl,
+      destination,
+      notes: children,
+      repository: this.dependencies.repository,
+      signal,
+      parentPageId
+    });
   }
   async prepareCandidates(files, destination, signal) {
     const candidates = [];
@@ -4026,10 +4129,10 @@ var Publisher = class {
       destination,
       this.dependencies.settings.titleSource
     )) {
-      if (selectedPaths.has(published.path) || !isSameDestination(published.record, destination)) continue;
+      if (selectedPaths.has(published.path) || !isSamePublicationDestination(published.record, destination)) continue;
       signal.throwIfAborted();
       const page = await this.dependencies.repository.getPage(published.record.pageId, signal);
-      if (page !== null && isPublishedPage(published.path, published.record.pageId, page, destination)) {
+      if (page !== null && isPublishedPage(published.path, published.record, page, destination)) {
         pageTitles.set(published.path, page.title);
       }
     }
@@ -4048,9 +4151,9 @@ var Publisher = class {
     }
   }
 };
-function isPublishedPage(sourcePath, pageId, page, destination) {
+function isPublishedPage(sourcePath, record, page, destination) {
   var _a;
-  return page.id === pageId && page.spaceKey === destination.spaceKey && page.parentPageId === destination.parentPageId && ((_a = page.ownership) == null ? void 0 : _a.schemaVersion) === 1 && page.ownership.destinationId === destination.destinationId && page.ownership.sourcePath === sourcePath;
+  return page.id === record.pageId && page.spaceKey === destination.spaceKey && page.parentPageId === record.parentPageId && ((_a = page.ownership) == null ? void 0 : _a.schemaVersion) === 1 && page.ownership.destinationId === destination.destinationId && page.ownership.sourcePath === sourcePath;
 }
 function createCleanupSignal() {
   const controller = new AbortController();
@@ -4724,7 +4827,7 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       callback: () => {
         new FileSelectModal(
           this.app,
-          (files) => this.selectDestinationAndPublish(files)
+          (selection) => this.selectDestinationAndPublish(selection)
         ).open();
       }
     });
@@ -4734,7 +4837,7 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file === null || file.extension.toLowerCase() !== "md") return false;
-        if (!checking) this.selectDestinationAndPublish([file]);
+        if (!checking) this.selectDestinationAndPublish({ files: [file], mainFile: file, outgoingChildPaths: /* @__PURE__ */ new Set() });
         return true;
       }
     });
@@ -4754,12 +4857,13 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       (settings) => this.saveData(settings)
     );
   }
-  selectDestinationAndPublish(files) {
+  selectDestinationAndPublish(selection) {
+    const { files } = selection;
     if (files.length === 0) {
       new import_obsidian6.Notice("No files selected.");
       return;
     }
-    this.selectDestination((destination) => this.runPublish(files, destination));
+    this.selectDestination((destination) => this.runPublish(files, destination, selection));
   }
   selectDestination(onChoose) {
     if (this.activePublish !== null) {
@@ -4792,7 +4896,8 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
       new import_obsidian6.Notice(`Unable to scan published notes: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  async runPublish(files, destination) {
+  async runPublish(files, destination, selection) {
+    var _a;
     if (this.activePublish !== null) {
       new import_obsidian6.Notice("A Confluence publish is already running.");
       return;
@@ -4817,7 +4922,10 @@ var ConfluencePublisherPlugin = class extends import_obsidian6.Plugin {
     progressModal.open();
     try {
       const publisher = this.createPublisher();
-      for await (const event of publisher.publish(files, destination, controller.signal)) {
+      for await (const event of publisher.publish(files, destination, controller.signal, {
+        mainPath: (_a = selection == null ? void 0 : selection.mainFile) == null ? void 0 : _a.path,
+        outgoingChildPaths: selection == null ? void 0 : selection.outgoingChildPaths
+      })) {
         progressModal.handleEvent(event);
       }
     } catch (error) {

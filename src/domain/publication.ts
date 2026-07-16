@@ -13,8 +13,9 @@ export interface DestinationSnapshot {
 }
 
 export interface PublicationRecord extends DestinationSnapshot {
-  pageId: string;
-  pageUrl: string;
+	destinationParentPageId?: string;
+	pageId: string;
+	pageUrl: string;
 }
 
 export interface LegacyPublication {
@@ -63,7 +64,8 @@ export interface NoteCandidate extends NoteInput {
 }
 
 export interface PlannedPage {
-  note: NoteCandidate;
+	note: NoteCandidate;
+	parentPageId?: string;
   pageId: string | null;
   operation: 'create' | 'update';
   migrateLegacy: boolean;
@@ -121,4 +123,14 @@ export function isSameDestination(left: DestinationSnapshot, right: DestinationS
     && normalizeBaseUrl(left.baseUrl) === normalizeBaseUrl(right.baseUrl)
     && left.spaceKey === right.spaceKey
     && left.parentPageId === right.parentPageId;
+}
+
+export function isSamePublicationDestination(
+	record: PublicationRecord,
+	destination: DestinationSnapshot,
+): boolean {
+	return record.destinationId === destination.destinationId
+		&& normalizeBaseUrl(record.baseUrl) === normalizeBaseUrl(destination.baseUrl)
+		&& record.spaceKey === destination.spaceKey
+		&& (record.destinationParentPageId ?? record.parentPageId) === destination.parentPageId;
 }

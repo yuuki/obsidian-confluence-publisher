@@ -119,6 +119,31 @@ describe('Publisher', () => {
 		);
 	});
 
+	it('creates selected outgoing notes beneath the current note', async () => {
+		const remote = fakeRepository();
+		const deps = dependencies(remote);
+		await collect(new Publisher(deps).publish(
+			[file('main.md'), file('child.md')],
+			destination(),
+			signal(),
+			{ mainPath: 'main.md', outgoingChildPaths: new Set(['child.md']) },
+		));
+
+		expect(remote.createPage).toHaveBeenNthCalledWith(
+			1, 'DOC', 'parent-1', 'Main', expect.any(String), expect.any(AbortSignal),
+		);
+		expect(remote.createPage).toHaveBeenNthCalledWith(
+			2, 'DOC', 'page-1', 'Child', expect.any(String), expect.any(AbortSignal),
+		);
+		expect(deps.notes.writePublication).toHaveBeenCalledWith(
+			expect.objectContaining({ path: 'child.md' }),
+			expect.objectContaining({
+				parentPageId: 'page-1',
+				destinationParentPageId: 'parent-1',
+			}),
+		);
+	});
+
 	it('performs no remote calls when image preflight fails', async () => {
 		const remote = fakeRepository();
 		const deps = dependencies(remote);

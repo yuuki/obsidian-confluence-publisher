@@ -1,6 +1,6 @@
 import {
 	destinationSnapshot,
-	isSameDestination,
+	isSamePublicationDestination,
 	type Destination,
 	type DestinationSnapshot,
 	type NoteCandidate,
@@ -18,18 +18,19 @@ interface PlannerInput {
 	notes: NoteCandidate[];
 	repository: PageLookup;
 	signal: AbortSignal;
+	parentPageId?: string;
 }
 
 export async function buildPublicationPlan(input: PlannerInput): Promise<PublicationPlanResult> {
-	const snapshot = destinationSnapshot(input.baseUrl, input.destination);
-	const localIssues = validateLocalInput(snapshot, input.notes);
+	const { snapshot, issues: localIssues } = validatePublicationPlanInput(input.baseUrl, input.destination, input.notes);
+	const parentPageId = input.parentPageId ?? snapshot.parentPageId;
 	if (localIssues.length > 0) return { ok: false, issues: localIssues };
 
 	const pages: PlannedPage[] = [];
 	const remoteIssues: PlanIssue[] = [];
 	for (const note of input.notes) {
 		input.signal.throwIfAborted();
-		const resolution = await resolveNote(snapshot, note, input.repository, input.signal);
+		const resolution = await resolveNote(snapshot, parentPageId, note, input.repository, input.signal);
 		if ('issue' in resolution) remoteIssues.push(resolution.issue);
 		else pages.push(resolution.page);
 	}
@@ -37,6 +38,15 @@ export async function buildPublicationPlan(input: PlannerInput): Promise<Publica
 	return remoteIssues.length > 0
 		? { ok: false, issues: remoteIssues }
 		: { ok: true, snapshot, pages };
+}
+
+export function validatePublicationPlanInput(
+	baseUrl: string,
+	destination: Destination,
+	notes: NoteCandidate[],
+): { snapshot: DestinationSnapshot; issues: PlanIssue[] } {
+	const snapshot = destinationSnapshot(baseUrl, destination);
+	return { snapshot, issues: validateLocalInput(snapshot, notes) };
 }
 
 function validateLocalInput(snapshot: DestinationSnapshot, notes: NoteCandidate[]): PlanIssue[] {
@@ -68,7 +78,7 @@ function validateLocalInput(snapshot: DestinationSnapshot, notes: NoteCandidate[
 			}
 		}
 
-		if (note.publication !== null && !isSameDestination(note.publication, snapshot)) {
+		if (note.publication !== null && !isSamePublicationDestination(note.publication, snapshot)) {
 			issues.push({
 				code: 'destination-mismatch',
 				path: note.path,
@@ -135,6 +145,7 @@ function isUrlWithinBase(pageUrl: string, baseUrl: string): boolean {
 
 async function resolveNote(
 	snapshot: DestinationSnapshot,
+	parentPageId: string,
 	note: NoteCandidate,
 	repository: PageLookup,
 	signal: AbortSignal,
@@ -144,7 +155,7 @@ async function resolveNote(
 	if (savedPageId !== null) {
 		const savedPage = await repository.getPage(savedPageId, signal);
 		signal.throwIfAborted();
-		if (savedPage !== null) return resolveSavedPage(snapshot, note, savedPage, isLegacy);
+		if (savedPage !== null) return resolveSavedPage(snapshot, parentPageId, note, savedPage, isLegacy);
 	}
 
 	signal.throwIfAborted();
@@ -154,6 +165,7 @@ async function resolveNote(
 		return {
 			page: {
 				note,
+				...(parentPageId === snapshot.parentPageId ? {} : { parentPageId }),
 				pageId: null,
 				operation: 'create',
 				migrateLegacy: isLegacy,
@@ -163,7 +175,7 @@ async function resolveNote(
 	}
 
 	const candidate = candidates[0];
-	if (candidates.length !== 1 || !isExactOwnedPage(candidate, snapshot, note.path)) {
+	if (candidates.length !== 1 || !isExactOwnedPage(candidate, snapshot, parentPageId, note.path)) {
 		return {
 			issue: {
 				code: 'ambiguous-page',
@@ -176,6 +188,7 @@ async function resolveNote(
 	return {
 		page: {
 			note,
+			...(parentPageId === snapshot.parentPageId ? {} : { parentPageId }),
 			pageId: candidate.id,
 			operation: 'update',
 			migrateLegacy: isLegacy,
@@ -186,11 +199,12 @@ async function resolveNote(
 
 function resolveSavedPage(
 	snapshot: DestinationSnapshot,
+	parentPageId: string,
 	note: NoteCandidate,
 	page: ResolvedPage,
 	isLegacy: boolean,
 ): { page: PlannedPage } | { issue: PlanIssue } {
-	const exactLocation = page.spaceKey === snapshot.spaceKey && page.parentPageId === snapshot.parentPageId;
+	const exactLocation = page.spaceKey === snapshot.spaceKey && page.parentPageId === parentPageId;
 	const exactOwnership = isExpectedOwnership(page.ownership, snapshot.destinationId, note.path);
 	const acceptableLegacyOwnership = isLegacy && page.ownership === null;
 	if (!exactLocation || (!exactOwnership && !acceptableLegacyOwnership)) {
@@ -206,6 +220,7 @@ function resolveSavedPage(
 	return {
 		page: {
 			note,
+			...(parentPageId === snapshot.parentPageId ? {} : { parentPageId }),
 			pageId: page.id,
 			operation: 'update',
 			migrateLegacy: isLegacy,
@@ -214,9 +229,9 @@ function resolveSavedPage(
 	};
 }
 
-function isExactOwnedPage(page: ResolvedPage, snapshot: DestinationSnapshot, sourcePath: string): boolean {
+function isExactOwnedPage(page: ResolvedPage, snapshot: DestinationSnapshot, parentPageId: string, sourcePath: string): boolean {
 	return page.spaceKey === snapshot.spaceKey
-		&& page.parentPageId === snapshot.parentPageId
+		&& page.parentPageId === parentPageId
 		&& isExpectedOwnership(page.ownership, snapshot.destinationId, sourcePath);
 }
 
